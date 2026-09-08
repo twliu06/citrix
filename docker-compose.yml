@@ -1,0 +1,49 @@
+services:
+
+  citrix-etl:
+    build: .
+
+    container_name: citrix_etl
+
+    volumes:
+      - .:/app
+
+    # ⚠️ 刻意不使用 env_file
+    #
+    # 本專案的 .env 採用專案慣例格式 `KEY ="value"`（等號前有空白、值加引號），
+    # python-dotenv 讀得懂，但 docker 的 env_file 讀不懂：
+    #   - 等號前的空白會讓 docker 拒絕整份檔案
+    #   - 雙引號不會被剝掉，主機名稱會變成含引號的字串而解析失敗
+    #
+    # 所以改用 researchgo / smart_meter / sdg 的做法：把專案目錄掛進容器，
+    # 由程式自己的 load_dotenv() 去讀 /app/.env。
+
+    # ⚠️ 也刻意不掛載主機的 /etc/odbcinst.ini
+    #
+    # fcu_db 有掛，因為它的 SAP IQ / ASE 驅動程式是主機上的專有安裝。
+    # 本專案的 msodbcsql18 是裝在 image 內的，掛主機設定會蓋掉容器內的
+    # 驅動程式註冊，導致找不到 "ODBC Driver 18 for SQL Server"。
+
+    environment:
+
+      # ODBC
+      ODBCINI: /etc/odbc.ini
+      ODBCSYSINI: /etc
+
+      # Charset
+      #
+      # 一併解決 log 的編碼問題：utils/logger.py 會 print 中文與 emoji，
+      # 主控台若不是 UTF-8 會拋 UnicodeEncodeError，把真正的錯誤訊息蓋掉。
+      LANG: C.UTF-8
+      LC_ALL: C.UTF-8
+      PYTHONIOENCODING: utf-8
+
+    network_mode: "host"
+
+    command: tail -f /dev/null
+
+    restart: unless-stopped
+
+    tty: true
+
+    stdin_open: true

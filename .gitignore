@@ -1,0 +1,14 @@
+__pycache__/
+*.pyc
+.env
+.venv/
+venv/
+.vscode/
+.idea/
+*.log
+docs/
+utils/init_student_data.py
+check_samples/
+probe/
+probe_report/
+.claude/
