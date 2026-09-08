@@ -44,11 +44,16 @@ Citrix 監控資料庫會自動清除過期資料，實測各粒度的保留期�
 | `MonitorData.User` | `citrix.user_account` | 8 | `Id` |
 | `MonitorData.Connection` | `citrix.connection` | 37 | `Id` |
 
-### ⚠️ 時間戳是 UTC
+### ⚠️ 來源是 UTC，倉儲一律存台北時間
 
-資料庫裡沒有任何欄位標記時區。把 Session 起始時間按小時分組，直接讀 DB 的值高峰落在清晨 5–6 點、離峰在晚上 8–11 點；**+8 之後**才是合理的校園作息（下午 1–3 點主峰、晚上 8–10 點次峰、凌晨 2–7 點近乎歸零）。
+Citrix 資料庫的時間欄位全部是 UTC，而且沒有任何欄位標記時區。把 Session 起始時間按小時分組就看得出來：直接讀 DB 的值，高峰落在清晨 5–6 點、離峰在晚上 8–11 點；**+8 之後**才是合理的校園作息（下午 1–3 點主峰、晚上 8–10 點次峰、凌晨 2–7 點近乎歸零）。
 
-RAW 層照原樣保存 UTC 不做轉換，時區轉換留到下游處理。
+**倉儲內禁止儲存 UTC。** 來源的時間欄位在寫入 RAW 之前就會轉成 `Asia/Taipei`，轉換一律走 `utils/time_utils.py` 的 `utc_to_taipei()`。STG 的來源是 RAW，直接繼承台北時間，不再另外轉換。
+
+這樣做是為了避免同一列裡混著兩種時區 —— `created_at`／`updated_at` 是 `now_taipei()` 產生的台北時間，若來源欄位保持 UTC，同一筆資料的 `app_started_at` 會比 `created_at` 早 8 小時，下游拿去比對必然出錯。
+
+> ⚠️ **連帶影響：水位線送回來源前要轉回 UTC。**
+> RAW 存的是台北時間，`MAX("ModifiedDate")` 讀出來自然也是台北時間；但 Citrix 來源是 UTC，直接拿去查等於用「未來 8 小時」的條件過濾，**會回傳 0 筆而讓管線靜默停擺**。`utils/incremental_etl.py` 用 `taipei_to_utc()` 處理這一步，改動增量邏輯時不要動掉它。
 
 ### ⚠️ 資料列會就地更新
 
@@ -70,7 +75,7 @@ Power BI 報表上的 ACL、ANSYS、ArcGIS、Archicad、Autodesk、Creo Parametr
 SELECT "SessionKey", "StartDate" FROM citrix.session;
 ```
 
-型態只有兩種：**時間欄位 `TIMESTAMP(6)`，其餘一律 `TEXT`**。除 `id`、`created_at`、`updated_at` 三個系統欄位外皆可為空 —— RAW 的職責是收得進來，不是擋資料。
+型態只有兩種：**時間欄位 `TIMESTAMP(6)`（已轉台北時間），其餘一律 `TEXT`**。除 `id`、`created_at`、`updated_at` 三個系統欄位外皆可為空 —— RAW 的職責是收得進來，不是擋資料。
 
 | 表 | 說明 | 筆數 |
 |---|---|---|
@@ -194,7 +199,7 @@ sudo cp deploy/cron.d/citrix /etc/cron.d/citrix
 
 RAW 每次抓回「水位線往回退 30 天」的資料，依自然鍵比對：新的 INSERT、有變的 UPDATE、**沒變的完全不寫入**（被 `WHERE ... IS DISTINCT FROM` 擋下）。因此 `id` 保持穩定，`updated_at` 的語意是「內容最後變動的時間」。
 
-回溯視窗而非嚴格的 `> 水位線`，是為了收到那些在水位線通過後才被更新的列。視窗長度有 `MAX_LOOKBACK_DAYS = 60` 的上限保護 —— 視窗會先刪除切片再重載，一旦超過來源保留期，刪掉的資料來源已經沒有了。
+回溯視窗而非嚴格的 `> 水位線`，是為了收到那些在水位線通過後才被更新的列。視窗內既有的資料不會被刪除，只是重新比對一次，所以拉長視窗不會有資料遺失風險，代價只是多比對幾筆。`MAX_LOOKBACK_DAYS = 60` 是避免無意義的大範圍掃描。
 
 STG 的來源是 RAW，完整歷史都在，整表重建沒有風險。
 

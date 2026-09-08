@@ -32,7 +32,7 @@ from psycopg2.extras import execute_values
 from config.raw_tables import DEFAULT_LOOKBACK_DAYS, MAX_LOOKBACK_DAYS
 from utils.db_citrix import get_conn as get_citrix_conn
 from utils.db_raw import get_conn as get_raw_conn
-from utils.time_utils import now_taipei
+from utils.time_utils import now_taipei, taipei_to_utc, utc_to_taipei
 
 
 def get_target_columns(cur, table_name: str) -> dict[str, str]:
@@ -77,16 +77,20 @@ def fetch_source_rows(original_table, inc_key, window_start, columns, print_log)
 
 def coerce(value, data_type):
     """
-    RAW 層型態：時間欄位保持 datetime，其餘轉字串。
+    RAW 層型態：時間欄位轉成台北時間，其餘轉字串。
 
-    PostgreSQL 不會自動把 timestamp 指派給 text 欄位，
-    所以非時間欄位一定要在這裡先轉成 str。
+    Citrix 來源的時間欄位全部是 UTC 且無時區標記，這裡一律轉成
+    Asia/Taipei —— 倉儲內禁止儲存 UTC，避免同一列裡 created_at
+    是台北、來源欄位卻是 UTC 的混用情況。
+
+    非時間欄位一定要先轉成 str，PostgreSQL 不會自動把其他型別
+    指派給 text 欄位。
     """
     if value is None:
         return None
 
     if data_type.startswith("timestamp") or data_type == "date":
-        return value
+        return utc_to_taipei(value)
 
     return str(value)
 
@@ -137,7 +141,7 @@ def run_incremental_etl(table_key, cfg, print_log, lookback_days=None):
     if lookback_days > MAX_LOOKBACK_DAYS:
         raise ValueError(
             f"❌ {table_key} 的 lookback_days={lookback_days} 超過上限 "
-            f"{MAX_LOOKBACK_DAYS} 天"
+            f"{MAX_LOOKBACK_DAYS} 天（避免無意義的大範圍掃描）"
         )
 
     conn = get_raw_conn(autocommit=False)
@@ -163,7 +167,7 @@ def run_incremental_etl(table_key, cfg, print_log, lookback_days=None):
             if max_val:
                 window_start = max_val - timedelta(days=lookback_days)
                 print_log(
-                    f"📈 上次同步至 {max_val}，回溯 {lookback_days} 天 "
+                    f"📈 上次同步至 {max_val}（台北），回溯 {lookback_days} 天 "
                     f"→ 比對 {window_start} 之後的資料"
                 )
             else:
@@ -171,8 +175,13 @@ def run_incremental_etl(table_key, cfg, print_log, lookback_days=None):
                 print_log("🚀 目標表為空，執行全量初始化")
 
             # 2️⃣ 撈來源
+            #
+            # ⚠️ 水位線取自 RAW，已是台北時間；Citrix 來源是 UTC，
+            #    送過去之前必須轉回 UTC。少了這一步等於用「未來 8 小時」
+            #    的條件去查，會查不到任何資料而讓管線靜默停擺。
             names, rows = fetch_source_rows(
-                original_table, inc_key, window_start, columns, print_log
+                original_table, inc_key, taipei_to_utc(window_start),
+                columns, print_log
             )
 
             if names != columns:
