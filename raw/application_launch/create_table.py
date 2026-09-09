@@ -1,7 +1,7 @@
 from utils.db_raw import get_conn
 
 TABLE_NAME = "citrix.application_launch"
-TABLE_COMMENT = "應用程式啟動紀錄 (原始資料)(原表名: MonitorData.ApplicationInstance)"
+TABLE_COMMENT = "應用程式啟動紀錄（來源：MonitorData.ApplicationInstance）"
 
 # RAW 層：
 #   1. 欄位名稱完全照抄來源基底表（SQL Server 駝峰式），

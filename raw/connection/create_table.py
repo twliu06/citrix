@@ -1,7 +1,7 @@
 from utils.db_raw import get_conn
 
 TABLE_NAME = "citrix.connection"
-TABLE_COMMENT = "連線紀錄 (原始資料)(原表名: MonitorData.Connection)"
+TABLE_COMMENT = "連線紀錄（來源：MonitorData.Connection）"
 
 # RAW 層：
 #   1. 欄位名稱完全照抄來源基底表（SQL Server 駝峰式），

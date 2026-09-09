@@ -1,7 +1,7 @@
 from utils.db_raw import get_conn
 
 TABLE_NAME = "citrix.user_account"
-TABLE_COMMENT = "使用者清單 (原始資料)(原表名: MonitorData.User)"
+TABLE_COMMENT = "使用者清單（來源：MonitorData.User）"
 
 # RAW 層：
 #   1. 欄位名稱完全照抄來源基底表（SQL Server 駝峰式），

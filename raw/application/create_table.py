@@ -1,7 +1,7 @@
 from utils.db_raw import get_conn
 
 TABLE_NAME = "citrix.application"
-TABLE_COMMENT = "應用程式清單 (原始資料)(原表名: MonitorData.Application)"
+TABLE_COMMENT = "應用程式清單（來源：MonitorData.Application）"
 
 # RAW 層：
 #   1. 欄位名稱完全照抄來源基底表（SQL Server 駝峰式），
