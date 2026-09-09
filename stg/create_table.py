@@ -5,7 +5,7 @@ TABLE_COMMENT = "Citrix 雲端軟體使用紀錄"
 
 # (欄位名稱, 資料型態, NOT NULL, 欄位註解)
 COLUMNS = [
-    ("software_usage_id", "BIGSERIAL PRIMARY KEY", True, "軟體使用紀錄識別碼"),
+    ("id", "BIGSERIAL PRIMARY KEY", True, "識別碼"),
 
     # === 使用者 ===
     ("user_identifier", "VARCHAR(20)", True, "使用者證號"),
