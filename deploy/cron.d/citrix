@@ -50,18 +50,27 @@ PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
 # raw 與 stg 用 && 串接：raw 失敗就不跑 stg，避免拿半套的來源資料去
 # 覆蓋已經正確的 stg。RAW 是 diff upsert、STG 是整表重建，都可重跑。
 #
-# 排在 02:30 的理由：
-#   - 避開日間使用尖峰（實測台北時間 13~15 時為主峰）
-#   - 距離 Power BI 語意模型的更新時間（約中午 12:30）有足夠緩衝
+# 排在 01:00 的理由：避開日間使用尖峰（實測台北時間 13~15 時為主峰），
+# 且距離 Power BI 語意模型的更新時間（約中午 12:30）有足夠緩衝。
 #
-# timeout 10m 是防呆：實測一輪約 10 秒（五張表合計約兩萬列），
-# 正常不可能接近上限。超時代表來源或網路異常，讓它死掉，隔天重跑。
+# ⚠️ timeout 要放在 docker exec 之後，不是之前
 #
-# flock -n 確保不會有兩輪同時在跑。
+# 放在外面時，timeout 殺掉的是 docker 用戶端，容器內的 python 毫髮無傷
+# 地繼續跑，變成「cron 回報失敗（退出碼 124）、資料庫裡卻成功」的不一致
+# 狀態，而且 flock 提早被釋放，下一輪可能與孤兒行程並行寫同一張表。
+# 放進容器內才殺得到真正的行程。
+#
+# 30m 是保證鎖會被釋放的上限，不是對執行時間的預期（正常一輪約 10 秒：
+# raw 約 2 秒、stg 約 1 秒）。外層的 70m 只防 dockerd 卡死導致用戶端
+# 不返回，是釋放 flock 的最後保險。
+#
+# python -u 關閉 stdout 緩衝。Python 的輸出導向檔案時是塊緩衝（8KB），
+# 行程若被中途殺掉，緩衝區裡的 log 會整批消失 —— 最需要 log 的那一次
+# 反而什麼都看不到。
 # ------------------------------------------------------------
 
 # Citrix 雲端軟體使用紀錄（raw → stg）
-30 2 * * * twliu timeout 10m flock -n /tmp/citrix.lockfile bash -c 'docker exec citrix_etl python -m raw.main all && docker exec citrix_etl python -m stg.main' >> /var/log/citrix/etl.log 2>&1
+0 1 * * * twliu timeout 70m flock -n /tmp/citrix.lockfile bash -c 'docker exec citrix_etl timeout 30m python -u -m raw.main all && docker exec citrix_etl timeout 30m python -u -m stg.main' >> /var/log/citrix/etl.log 2>&1
 
 # ------------------------------------------------------------
 # ⚠️ flock -n 的行為

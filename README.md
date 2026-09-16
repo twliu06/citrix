@@ -178,22 +178,33 @@ citrix/
 
 ## ⏱️ 排程
 
-```
-30 2 * * *  每天 02:30（台北時間）
-```
+| 頻率 | 工作 | 指令 | log |
+| --- | --- | --- | --- |
+| 每天 01:00（台北時間） | RAW → STG | `python -u -m raw.main all && python -u -m stg.main` | `/var/log/citrix/etl.log` |
 
-安裝：
+設定檔在 `deploy/cron.d/citrix`，那是排程的唯一來源，改完要重新安裝才會生效：
 
 ```bash
 sudo mkdir -p /var/log/citrix && sudo chown twliu:twliu /var/log/citrix
 sudo cp deploy/cron.d/citrix /etc/cron.d/citrix
+sudo chown root:root /etc/cron.d/citrix && sudo chmod 644 /etc/cron.d/citrix
 ```
 
 > ⚠️ `/etc/cron.d/citrix` 權限必須是 644、擁有者 root，否則 cron 會整份忽略且不報錯。檔名也不能含 `.` 等特殊字元。
 
-排在 02:30 的理由：避開日間使用尖峰（台北時間 13–15 時為主峰），且距離 Power BI 語意模型的更新時間（約中午 12:30）有足夠緩衝。
+`raw` 與 `stg` 用 `&&` 串接 —— raw 失敗就不跑 stg，避免拿半套的來源資料去覆蓋已經正確的 stg。實測一輪約 10 秒（raw 約 2 秒、stg 約 1 秒）。
 
-`raw` 與 `stg` 用 `&&` 串接 —— raw 失敗就不跑 stg，避免拿半套的來源資料去覆蓋已經正確的 stg。實測一輪約 10 秒。
+排在 01:00 的理由：避開日間使用尖峰（台北時間 13–15 時為主峰），且距離 Power BI 語意模型的更新時間（約中午 12:30）有足夠緩衝。
+
+### timeout 的位置與用途
+
+`timeout` 寫在 `docker exec` **之後**，在容器內生效。放在外面時它殺掉的只是 docker 用戶端，容器內的 python 會毫髮無傷地繼續跑，變成「cron 回報失敗、資料庫裡卻成功」的不一致狀態，而且 `flock` 提早被釋放，下一輪可能與孤兒行程並行寫同一張表。
+
+容器內的 `30m` 是保證鎖會被釋放的上限，不是對執行時間的預期；外層的 `70m` 只防 dockerd 卡死導致用戶端不返回。
+
+`python -u` 關閉 stdout 緩衝。Python 的輸出導向檔案時是塊緩衝（8KB），行程若被中途殺掉，緩衝區裡的 log 會整批消失 —— 最需要 log 的那一次反而什麼都看不到。
+
+STG 另外設了 `lock_timeout = 60s`。整表重建的 `TRUNCATE` 需要 ACCESS EXCLUSIVE 鎖，只要有任何一個交易對這張表開著（連純 SELECT 也算）就得排隊，預設是無聲等到對方結束。設了上限就會在 60 秒內放棄並在 log 說明原因。
 
 ### RAW 用 upsert，STG 用整表重建
 
