@@ -28,7 +28,7 @@ Citrix 監控資料庫會自動清除過期資料，實測各粒度的保留期�
 | 時彙總 `Granularity=60` | 約 32 天 |
 | 分鐘彙總 `Granularity=1`、ResourceUtilization | 3～4 天 |
 
-**RAW 層是這份資料唯一的長期保存處。** 排程停跑超過 90 天，中間那段就永久消失，無法回補。這與 fcu_db、researchgo 不同 —— 那些來源本身留有完整歷史，漏跑幾天補跑即可。
+**RAW 層是這份資料唯一的長期保存處。** 排程停跑超過 90 天，中間那段就永久消失，無法回補。排程失敗時會送 Teams 通知，見「Teams 通知」章節。
 
 因此 RAW **不能**用 truncate 整表重建，只能走增量。
 
@@ -144,6 +144,10 @@ docker exec citrix_etl python -m stg.create_table
 ### 同步資料
 
 ```bash
+# 與排程相同：RAW → STG、寫 log、依結果送出通知
+flock -n /tmp/citrix.lockfile ~/citrix/run_etl.sh etl
+
+# 只看輸出，不寫 log、不送通知
 docker exec citrix_etl python -m raw.main all          # 五張表
 docker exec citrix_etl python -m raw.main session      # 指定表
 docker exec citrix_etl python -m stg.main
@@ -166,6 +170,8 @@ citrix/
 ├── stg/
 │   ├── main.py
 │   └── create_table.py
+├── lib/
+│   └── notify.sh           Teams 通知與重送
 ├── utils/
 │   ├── db_citrix.py        來源 SQL Server
 │   ├── db_raw.py           目標 Postgres（raw）
@@ -173,6 +179,7 @@ citrix/
 │   ├── incremental_etl.py  RAW 增量 upsert
 │   ├── logger.py
 │   └── time_utils.py
+├── run_etl.sh              排程的執行包裝：RAW → STG、寫 log、送出通知
 └── deploy/cron.d/citrix    排程
 ```
 
@@ -180,31 +187,97 @@ citrix/
 
 | 頻率 | 工作 | 指令 | log |
 | --- | --- | --- | --- |
-| 每天 01:00（台北時間） | RAW → STG | `python -u -m raw.main all && python -u -m stg.main` | `/var/log/citrix/etl.log` |
+| 每天 01:00（台北時間） | RAW → STG，依結果送出通知 | `run_etl.sh etl` | `/var/log/citrix/etl_YYYY-MM-DD.log` |
+| 每小時 :50 | 重送先前送不出去的通知；沒有就什麼都不做 | `run_etl.sh flush` | 同上（有重送時才寫） |
 
-設定檔在 `deploy/cron.d/citrix`，那是排程的唯一來源，改完要重新安裝才會生效：
+設定檔在 `deploy/cron.d/citrix`，那是排程的唯一來源，改完要重新執行第 3、4 步才會生效：
 
 ```bash
+# 1. 建立 log 目錄並給執行身分權限
 sudo mkdir -p /var/log/citrix && sudo chown twliu:twliu /var/log/citrix
+
+# 2. 執行權限
+chmod +x run_etl.sh
+
+# 3. 安裝排程
 sudo cp deploy/cron.d/citrix /etc/cron.d/citrix
+
+# 4. 權限必須是 644、擁有者 root，否則 cron 會整份忽略且不報錯
 sudo chown root:root /etc/cron.d/citrix && sudo chmod 644 /etc/cron.d/citrix
 ```
 
-> ⚠️ `/etc/cron.d/citrix` 權限必須是 644、擁有者 root，否則 cron 會整份忽略且不報錯。檔名也不能含 `.` 等特殊字元。
+> ⚠️ 檔名不能含 `.` 等特殊字元，否則同樣被整份忽略且不報錯。
 
-`raw` 與 `stg` 用 `&&` 串接 —— raw 失敗就不跑 stg，避免拿半套的來源資料去覆蓋已經正確的 stg。實測一輪約 10 秒（raw 約 2 秒、stg 約 1 秒）。
+`raw` 與 `stg` 依序執行 —— raw 失敗就不跑 stg，避免拿半套的來源資料去覆蓋已經正確的 stg。實測一輪約 10 秒（raw 約 2 秒、stg 約 1 秒）。
 
 排在 01:00 的理由：避開日間使用尖峰（台北時間 13–15 時為主峰），且距離 Power BI 語意模型的更新時間（約中午 12:30）有足夠緩衝。
 
+查看執行紀錄：
+
+```bash
+tail -f /var/log/citrix/etl_$(date +%F).log
+```
+
 ### timeout 的位置與用途
 
-`timeout` 寫在 `docker exec` **之後**，在容器內生效。放在外面時它殺掉的只是 docker 用戶端，容器內的 python 會毫髮無傷地繼續跑，變成「cron 回報失敗、資料庫裡卻成功」的不一致狀態，而且 `flock` 提早被釋放，下一輪可能與孤兒行程並行寫同一張表。
+`run_etl.sh` 把 `timeout 30m` 寫在 `docker exec` **之後**，在容器內生效。放在外面時它中止的只是 docker 用戶端，容器內的 python 會繼續跑，變成「通知說失敗、資料庫裡卻成功」的不一致狀態，而且 `flock` 提早被釋放，下一輪可能與孤兒行程並行寫同一張表。
 
-容器內的 `30m` 是保證鎖會被釋放的上限，不是對執行時間的預期；外層的 `70m` 只防 dockerd 卡死導致用戶端不返回。
+`30m` 是保證鎖會被釋放的上限，不是對執行時間的預期；主機端另包的 `35m` 只防 dockerd 卡住導致 `docker exec` 不返回。
 
-`python -u` 關閉 stdout 緩衝。Python 的輸出導向檔案時是塊緩衝（8KB），行程若被中途殺掉，緩衝區裡的 log 會整批消失 —— 最需要 log 的那一次反而什麼都看不到。
+`python -u` 關閉 stdout 緩衝。Python 的輸出導向檔案時是塊緩衝（8KB），行程若被中途中止，緩衝區裡的 log 會整批消失 —— 最需要 log 的那一次反而什麼都看不到。
 
 STG 另外設了 `lock_timeout = 60s`。整表重建的 `TRUNCATE` 需要 ACCESS EXCLUSIVE 鎖，只要有任何一個交易對這張表開著（連純 SELECT 也算）就得排隊，預設是無聲等到對方結束。設了上限就會在 60 秒內放棄並在 log 說明原因。
+
+### 🔔 Teams 通知
+
+在 `.env` 加上 webhook（視同密碼，不進版控）：
+
+```
+TEAMS_WEBHOOK_URL = "https://..."
+```
+
+未設定時 ETL 照跑，只是不送通知。
+
+| 情境 | 通知 | 要不要處理 |
+| --- | --- | --- |
+| 失敗（程式出錯、有表同步失敗、容器沒在跑、超過 30 分鐘） | 🚨 紅色「Citrix ETL 失敗」，附原因、失敗起始時間、補跑指令。每班都送 | 要。90 天內恢復的話漏掉的資料會自動補齊 |
+| 失敗後第一次成功 | ✅ 綠色「Citrix ETL 已恢復」，附各表筆數與水位線 | 不用 |
+| 每週一（不論成敗） | 📊 藍色「Citrix ETL 週報」，格式見下方。當天失敗或恢復的那則另外照送 | 看最後一行「目前狀態」 |
+| 其他日子成功 | 不送，只寫 log | — |
+| 某個星期一沒收到任何通知 | — | 排程或主機有問題（例如 `flock` 一直拿不到鎖而被靜默跳過），上主機看 log 與 `/etc/cron.d/citrix` |
+| 送不出去，之後才補送 | 同上，內文最後註明「原本應於 MM/DD HH:MM 送出」 | 依原本的情境處理 |
+
+送不出去的通知暫存在 `~/.local/state/citrix/pending/`，由每小時的 `flush` 重送。失敗起始時間記在 `~/.local/state/citrix/failing_since`，恢復時刪除。
+
+#### 週報
+
+```text
+統計區間：2026-10-20 起                    ← 上週二到今天這 7 班
+
+📈 本班各表筆數與水位線
+citrix.session        累計 12345 筆，水位線 2026-10-26 23:58:12
+citrix.user_account   來源無新資料，水位線 2026-10-24 08:00:00
+...
+private.citrix_...    共 6789 筆
+
+💥 本週排程沒跑完
+每日 ETL              0 次
+
+目前狀態：全部正常                          ← 綠色
+```
+
+| 項目 | 意思 |
+| --- | --- |
+| 水位線 | 該表最新一筆資料的異動時間，應該接近當天；停在好幾天前代表來源沒有新資料進來 |
+| 本週排程沒跑完 | 區間內失敗的班數，log 裡 `❌ run_etl 失敗` 的行數。分不出「出過事、已經好了」和「現在正在壞」 |
+| 目前狀態 | 「要不要現在動手」的依據。全部正常是綠色；正在失敗時是紅色，列出 `⚠️ 每日 ETL：自 2026-10-25 01:00 起連續 2 班失敗` |
+
+週報標題是藍色而不是綠色：它只代表排程還活著，成敗看「目前狀態」那一行。
+
+### 📝 Log
+
+- 程式只輸出到 stdout，由 `run_etl.sh` 寫進 `/var/log/citrix/etl_YYYY-MM-DD.log`，一天一個檔
+- 保留 180 天（一天約 1 KB），依檔名的日期由每班 `etl` 清除；其他檔名的檔案不動
 
 ### RAW 用 upsert，STG 用整表重建
 
@@ -213,14 +286,6 @@ RAW 每次抓回「水位線往回退 30 天」的資料，依自然鍵比對：
 回溯視窗而非嚴格的 `> 水位線`，是為了收到那些在水位線通過後才被更新的列。視窗內既有的資料不會被刪除，只是重新比對一次，所以拉長視窗不會有資料遺失風險，代價只是多比對幾筆。`MAX_LOOKBACK_DAYS = 60` 是避免無意義的大範圍掃描。
 
 STG 的來源是 RAW，完整歷史都在，整表重建沒有風險。
-
-### ⚠️ flock 靜默跳過
-
-`flock -n` 拿不到鎖就立刻放棄且不留痕跡，可能連續數天沒跑而無人察覺。這個專案對此特別敏感（見上方 90 天保留期），建議定期確認水位線有在推進：
-
-```sql
-SELECT MAX("ModifiedDate") FROM citrix.session;
-```
 
 ## 🐛 來源資料已知問題
 

@@ -1,5 +1,5 @@
-# base image 與 fcu_db 一致：釘住 Debian 版本（bookworm），不要用浮動的
-# python:3.13-slim。因為下面的 ODBC 套件庫路徑是綁 Debian 版本的，
+# 釘住 Debian 版本（bookworm），不要用浮動的 python:3.11-slim。
+# 因為下面的 ODBC 套件庫路徑是綁 Debian 版本的，
 # base image 若跟著 upstream 升到 trixie，套件庫來源會失效而 build 失敗。
 FROM python:3.11-slim-bookworm
 
@@ -7,7 +7,7 @@ WORKDIR /app
 
 COPY requirements.txt .
 
-# ODBC driver manager，與 fcu_db 相同
+# ODBC driver manager
 RUN apt-get update && apt-get install -y \
     unixodbc \
     unixodbc-dev \
@@ -15,13 +15,11 @@ RUN apt-get update && apt-get install -y \
 
 # Microsoft ODBC Driver 18 for SQL Server
 #
-# 與 fcu_db 的差別：fcu_db 的 SAP IQ / ASE client 是主機上的專有安裝，
-# 所以它把 /opt/sap 與 /etc/odbc*.ini 從主機唯讀掛進容器。
-# msodbcsql18 可自由散布，直接裝進 image 比較好 ——
-# 不必假設主機裝了什麼，換一台機器也能跑。
+# msodbcsql18 可自由散布，直接裝進 image —— 不必假設主機裝了什麼，
+# 換一台機器也能跑。
 #
-# 也因此 docker-compose.yml 刻意「不」掛載主機的 /etc/odbcinst.ini：
-# 掛上去會蓋掉這裡註冊的驅動程式，反而讓容器找不到 Driver 18。
+# 驅動程式註冊在 image 的 /etc/odbcinst.ini。docker-compose.yml 若掛載
+# 主機的同名檔，會蓋掉這裡的註冊，讓容器找不到 Driver 18。
 #
 # 驅動程式名稱要與 utils/db_citrix.py 的 CITRIX_DRIVER 預設值一致。
 RUN apt-get update && apt-get install -y --no-install-recommends \
@@ -44,7 +42,7 @@ RUN pip install --no-cache-dir -r requirements.txt
 
 COPY . .
 
-# ODBC 設定，與 fcu_db 一致
+# ODBC 設定檔位置
 ENV ODBCINI=/etc/odbc.ini
 ENV ODBCSYSINI=/etc
 

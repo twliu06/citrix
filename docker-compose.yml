@@ -8,21 +8,19 @@ services:
     volumes:
       - .:/app
 
-    # ⚠️ 刻意不使用 env_file
+    # 把專案目錄掛進容器，由程式自己的 load_dotenv() 去讀 /app/.env。
     #
-    # 本專案的 .env 採用專案慣例格式 `KEY ="value"`（等號前有空白、值加引號），
-    # python-dotenv 讀得懂，但 docker 的 env_file 讀不懂：
+    # .env 採 `KEY ="value"` 格式（等號前有空白、值加引號），python-dotenv
+    # 讀得懂，docker 的 env_file 讀不懂：
     #   - 等號前的空白會讓 docker 拒絕整份檔案
     #   - 雙引號不會被剝掉，主機名稱會變成含引號的字串而解析失敗
     #
-    # 所以改用 researchgo / smart_meter / sdg 的做法：把專案目錄掛進容器，
-    # 由程式自己的 load_dotenv() 去讀 /app/.env。
+    # log 不寫進專案目錄：程式只輸出到 stdout，由主機上的 run_etl.sh
+    # 寫進 /var/log/citrix。
 
-    # ⚠️ 也刻意不掛載主機的 /etc/odbcinst.ini
-    #
-    # fcu_db 有掛，因為它的 SAP IQ / ASE 驅動程式是主機上的專有安裝。
-    # 本專案的 msodbcsql18 是裝在 image 內的，掛主機設定會蓋掉容器內的
-    # 驅動程式註冊，導致找不到 "ODBC Driver 18 for SQL Server"。
+    # ⚠️ ODBC 驅動程式 msodbcsql18 裝在 image 內，註冊在 image 的
+    # /etc/odbcinst.ini。若掛載主機的同名檔，會蓋掉這份註冊，
+    # 導致找不到 "ODBC Driver 18 for SQL Server"。
 
     environment:
 

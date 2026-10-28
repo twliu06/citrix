@@ -4,15 +4,18 @@
 # 這份檔案是排程的唯一來源，修改後要重新安裝才會生效：
 #
 #     sudo cp deploy/cron.d/citrix /etc/cron.d/citrix
+#     sudo chown root:root /etc/cron.d/citrix && sudo chmod 644 /etc/cron.d/citrix
 #
-# 採用 /etc/cron.d 而非 crontab -e，因為這台機器上還有其他專案的排程，
-# /etc/cron.d 是附加式的，不會動到使用者原本的 crontab。
+# 採用 /etc/cron.d 而非 crontab -e：/etc/cron.d 是附加式的，
+# 不會動到使用者原本的 crontab。
 #
 # 格式：分 時 日 月 週 使用者 指令
 #       （比 crontab -e 的格式多了「使用者」欄位）
 #
 # 前置條件：
 #   1. 容器 citrix_etl 已啟動（docker compose up -d）
+#      compose 的 command 是 tail -f /dev/null，容器本身不跑 ETL，
+#      只是常駐著讓 cron 有對象可以 docker exec。
 #   2. schema 已建立（只需一次）：
 #        CREATE SCHEMA IF NOT EXISTS citrix;
 #        COMMENT ON SCHEMA citrix IS 'Citrix 雲端軟體服務（應用程式、工作階段、連線、使用者）';
@@ -26,16 +29,30 @@
 #   4. log 目錄已存在，且執行身分寫得進去：
 #        sudo mkdir -p /var/log/citrix
 #        sudo chown twliu:twliu /var/log/citrix
-#   5. 檔案權限需為 644、擁有者 root，否則 cron 會忽略整份檔案。
+#   5. 檔案權限需為 644、擁有者 root，否則 cron 會忽略整份檔案：
+#        sudo chown root:root /etc/cron.d/citrix
+#        sudo chmod 644 /etc/cron.d/citrix
 #      這一點沒得選：/etc/cron.d 的每一行都能指定執行身分（包括 root），
 #      檔案若可被非 root 寫入，等於讓該使用者提權，所以 cron 直接拒絕。
 #      檔名也不能含 `.` 等特殊字元，否則同樣被整份忽略且不報錯。
 #   6. 執行身分（第 6 欄）填 twliu，不是 root。
 #      twliu 必須屬於 docker 群組才能跑 docker exec：
 #        id -nG twliu | grep -w docker
+#   7. run_etl.sh 需有執行權限（chmod +x）。
+#   8. Teams 通知需要 webhook，設定方式見 README 的「Teams 通知」章節。
+#      未設定時 ETL 照跑，只是不會送出通知。
 # ============================================================
 
+SHELL=/bin/bash
 PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+
+# 排程觸發時間的時區。run_etl.sh 內部另有 export TZ，這裡只影響「何時執行」。
+# 主機時區本來就是 Asia/Taipei，寫出來是把隱含的條件變成明確的。
+CRON_TZ=Asia/Taipei
+
+# 本機沒有 MTA，cron 無法投遞郵件，明確關閉以免產生無謂的投遞錯誤。
+# 執行結果改由 run_etl.sh 透過 Teams webhook 通知。
+MAILTO=""
 
 # ------------------------------------------------------------
 # 每日 ETL（RAW → STG）
@@ -44,42 +61,31 @@ PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
 #
 # Citrix 監控資料庫只保留約 90 天，過期資料會被自動清除且無法回補。
 # RAW 層是這份資料唯一的長期保存處 —— 停跑超過 90 天，中間那段
-# 就永久消失了。這與 fcu_db、researchgo 不同，那些來源本身留有完整
-# 歷史，漏跑幾天補跑即可。
+# 就永久消失了。
 #
-# raw 與 stg 用 && 串接：raw 失敗就不跑 stg，避免拿半套的來源資料去
-# 覆蓋已經正確的 stg。RAW 是 diff upsert、STG 是整表重建，都可重跑。
+# 呼叫 run_etl.sh，不直接寫 docker exec。run_etl.sh 負責依序執行
+# raw 與 stg（raw 失敗就不跑 stg）、寫 log、判斷成敗、送出 Teams 通知。
+# 時間上限也在 run_etl.sh 裡，放在容器內才中止得到真正的 python 行程。
+#
+# 通知：失敗每班都送；恢復時送一則；每週一不論成敗另送一則週報，附各表水位線與目前狀態。
 #
 # 排在 01:00 的理由：避開日間使用尖峰（實測台北時間 13~15 時為主峰），
 # 且距離 Power BI 語意模型的更新時間（約中午 12:30）有足夠緩衝。
 #
-# ⚠️ timeout 要放在 docker exec 之後，不是之前
-#
-# 放在外面時，timeout 殺掉的是 docker 用戶端，容器內的 python 毫髮無傷
-# 地繼續跑，變成「cron 回報失敗（退出碼 124）、資料庫裡卻成功」的不一致
-# 狀態，而且 flock 提早被釋放，下一輪可能與孤兒行程並行寫同一張表。
-# 放進容器內才殺得到真正的行程。
-#
-# 30m 是保證鎖會被釋放的上限，不是對執行時間的預期（正常一輪約 10 秒：
-# raw 約 2 秒、stg 約 1 秒）。外層的 70m 只防 dockerd 卡死導致用戶端
-# 不返回，是釋放 flock 的最後保險。
-#
-# python -u 關閉 stdout 緩衝。Python 的輸出導向檔案時是塊緩衝（8KB），
-# 行程若被中途殺掉，緩衝區裡的 log 會整批消失 —— 最需要 log 的那一次
-# 反而什麼都看不到。
+# flock -n：前一次還沒跑完就直接跳過，不排隊堆積。拿不到鎖時
+#   run_etl.sh 根本不會執行，也不會送任何通知；連續跳過的話，
+#   星期一的週報就不會出現，那就是要上主機看的訊號。
 # ------------------------------------------------------------
 
-# Citrix 雲端軟體使用紀錄（raw → stg）
-0 1 * * * twliu timeout 70m flock -n /tmp/citrix.lockfile bash -c 'docker exec citrix_etl timeout 30m python -u -m raw.main all && docker exec citrix_etl timeout 30m python -u -m stg.main' >> /var/log/citrix/etl.log 2>&1
+0 1 * * * twliu flock -n /tmp/citrix.lockfile /home/twliu/citrix/run_etl.sh etl
 
 # ------------------------------------------------------------
-# ⚠️ flock -n 的行為
+# 重送先前送不出去的通知
 #
-# -n 是 non-blocking：拿不到鎖就立刻放棄且不留痕跡。
-# 若前一次執行還沒結束，這次會被靜默跳過 —— 不會重疊，
-# 但也不會有任何告警，可能連續數天沒跑而無人察覺。
+# 送不出去的通知若等明天那班才重送就晚了一天。每小時檢查一次，
+# 沒有待重送的通知就什麼都不做，不碰容器、不寫 log。
 #
-# 這個專案對「連續數天沒跑」特別敏感（見上方 90 天保留期說明），
-# 建議定期確認 RAW 的水位線有在推進：
-#     SELECT MAX("ModifiedDate") FROM citrix.session;
+# 與 ETL 共用同一把鎖：ETL 正在執行時這班直接跳過，ETL 跑完自己會重送。
 # ------------------------------------------------------------
+
+50 * * * * twliu flock -n /tmp/citrix.lockfile /home/twliu/citrix/run_etl.sh flush

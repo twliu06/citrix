@@ -1,38 +1,16 @@
-import os
-from datetime import datetime
-from typing import Optional
 from utils.time_utils import now_taipei
 
 
-def get_logger(
-    log_dir: str,
-    log_prefix: Optional[str] = None,
-):
+def get_logger():
     """
-    建立一個簡單的 print + file logger
+    建立一個加上台北時間戳記的 print，只輸出到 stdout，不寫檔。
 
-    Parameters
-    ----------
-    log_dir : str
-        log 資料夾路徑（不存在會自動建立）
-    log_prefix : str | None
-        log 檔名前綴，例如 raw_campus_meter_daily
-        若為 None，則使用資料夾名稱
+    排程上由 run_etl.sh 把輸出寫進 /var/log/citrix/etl_YYYY-MM-DD.log，
+    並負責清除逾期的檔。這裡若再寫一份，同樣的內容會存在兩個地方，
+    而且這一份不會被清。
     """
-    os.makedirs(log_dir, exist_ok=True)
-
-    if log_prefix is None:
-        log_prefix = os.path.basename(os.path.normpath(log_dir))
-
-    log_file = os.path.join(
-        log_dir,
-        f"{log_prefix}_{now_taipei().strftime('%Y-%m-%d')}.log"
-    )
 
     def _log(msg: str):
-        timestamped_msg = f"[{now_taipei().strftime('%Y-%m-%d %H:%M:%S')}] {msg}"
-        print(timestamped_msg)
-        with open(log_file, "a", encoding="utf-8") as f:
-            f.write(timestamped_msg + "\n")
+        print(f"[{now_taipei().strftime('%Y-%m-%d %H:%M:%S')}] {msg}", flush=True)
 
     return _log

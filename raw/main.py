@@ -6,17 +6,13 @@ RAW 層 ETL 主程式（五張表共用）
     python -m raw.main session connection   指定表
 """
 
-import os
 import sys
 
 from config.raw_tables import RAW_TABLES
 from utils.incremental_etl import run_incremental_etl
 from utils.logger import get_logger
 
-BASE_DIR = os.path.dirname(__file__)
-LOG_DIR = os.path.join(BASE_DIR, "logs")
-
-print_log = get_logger(log_dir=LOG_DIR, log_prefix="raw_citrix")
+print_log = get_logger()
 
 
 def main(table_keys=None, all_tables=False):

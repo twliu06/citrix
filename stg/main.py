@@ -9,8 +9,6 @@ STG 層 ETL 主程式
 TRUNCATE 與寫入在同一個交易內完成，中途失敗不會留下空表。
 """
 
-import os
-
 import psycopg2
 from psycopg2.extras import execute_values
 
@@ -20,13 +18,10 @@ from utils.db_stg import get_conn as get_stg_conn
 from utils.logger import get_logger
 from utils.time_utils import now_taipei
 
-BASE_DIR = os.path.dirname(__file__)
-LOG_DIR = os.path.join(BASE_DIR, "logs")
-
 # TRUNCATE 取不到鎖時的等待上限，超過就放棄並報錯（見 main() 內的說明）
 LOCK_TIMEOUT = "60s"
 
-print_log = get_logger(log_dir=LOG_DIR, log_prefix="stg_citrix")
+print_log = get_logger()
 
 
 def main():
