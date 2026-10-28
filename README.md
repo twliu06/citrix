@@ -147,6 +147,9 @@ docker exec citrix_etl python -m stg.create_table
 # 與排程相同：RAW → STG、寫 log、依結果送出通知
 flock -n /tmp/citrix.lockfile ~/citrix/run_etl.sh etl
 
+# 手動送一則週報，不重跑 ETL
+~/citrix/run_etl.sh weekly-report
+
 # 只看輸出，不寫 log、不送通知
 docker exec citrix_etl python -m raw.main all          # 五張表
 docker exec citrix_etl python -m raw.main session      # 指定表
@@ -254,7 +257,8 @@ TEAMS_WEBHOOK_URL = "https://..."
 ```text
 統計區間：2026-10-20 起                    ← 上週二到今天這 7 班
 
-📈 本班各表筆數與水位線
+📈 最近一班各表筆數與水位線
+最近一班              2026-10-26 01:00:00
 citrix.session        累計 12345 筆，水位線 2026-10-26 23:58:12
 citrix.user_account   來源無新資料，水位線 2026-10-24 08:00:00
 ...
@@ -273,6 +277,12 @@ private.citrix_...    共 6789 筆
 | 目前狀態 | 「要不要現在動手」的依據。全部正常是綠色；正在失敗時是紅色，列出 `⚠️ 每日 ETL：自 2026-10-25 01:00 起連續 2 班失敗` |
 
 週報標題是藍色而不是綠色：它只代表排程還活著，成敗看「目前狀態」那一行。
+
+手動送一則（不重跑 ETL，各表數字取自 log 裡最近一班的輸出）：
+
+```bash
+~/citrix/run_etl.sh weekly-report
+```
 
 ### 📝 Log
 

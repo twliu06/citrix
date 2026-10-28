@@ -5,6 +5,7 @@
 # 用法：
 #     run_etl.sh etl      # RAW → STG，每日一班，依結果送出通知
 #     run_etl.sh flush    # 只重送先前送不出去的通知，每小時一班
+#     run_etl.sh weekly-report  # 手動送一則週報；排程上由週一的 etl 接著送
 #
 # 職責是依序執行 RAW 與 STG、寫 log、判斷成敗、送出 Teams 通知。
 # ETL 的邏輯全部在容器裡的 Python 模組，這個腳本不做任何資料處理。
@@ -67,9 +68,9 @@ FAILING_SINCE_FILE="${HOME}/.local/state/citrix/failing_since"
 JOB="${1:-}"
 
 case "$JOB" in
-    etl|flush) ;;
+    etl|flush|weekly-report) ;;
     *)
-        echo "用法：$(basename "$0") etl|flush" >&2
+        echo "用法：$(basename "$0") etl|flush|weekly-report" >&2
         exit 2
         ;;
 esac
@@ -131,64 +132,8 @@ purge_old_logs() {
 }
 
 
-# ==============================
-# flush：只重送暫存的通知
-#
-# 不碰容器也不連 DB。cron 與 etl 共用同一把鎖，etl 正在執行時這班
-# 直接跳過：etl 跑完自己會重送。
-# ==============================
-if [ "$JOB" = "flush" ]; then
-    flush_pending
-    exit 0
-fi
-
-
-# ==============================
-# etl
-# ==============================
-RAW_OUTPUT="$(mktemp)"
-STG_OUTPUT="$(mktemp)"
-trap 'rm -f "$RAW_OUTPUT" "$STG_OUTPUT"' EXIT
-
-# run_stage <輸出檔> <python 模組與參數...>
-#
-# 回傳 docker exec 的離開碼：
-#   0    成功
-#   1    程式出錯（raw 是有表同步失敗，其餘表照樣寫入）
-#   124  超過時間上限被中止
-#   其他 容器不存在、沒在跑等 docker exec 本身的錯誤
-#
-# python -u 關閉 stdout 緩衝。輸出導向檔案時是塊緩衝（8KB），
-# 行程若被中途中止，緩衝區裡的 log 會整批消失。
-run_stage() {
-    local out="$1"
-    shift
-
-    timeout "$CLIENT_TIMEOUT" \
-        docker exec "$CONTAINER" timeout "$RUN_TIMEOUT" python -u -m "$@" 2>&1 \
-        | tee "$out"
-
-    # 要的是 docker exec 的離開碼，不是 tee 的
-    return "${PIPESTATUS[0]}"
-}
-
-# raw 與 stg 依序執行，raw 失敗就不跑 stg：避免拿半套的來源資料去
-# 覆蓋已經正確的 stg。RAW 是差異 upsert、STG 是整表重建，都可重跑。
-STAGE="RAW"
-run_stage "$RAW_OUTPUT" raw.main all
-RC=$?
-
-if [ "$RC" -eq 0 ]; then
-    STAGE="STG"
-    run_stage "$STG_OUTPUT" stg.main
-    RC=$?
-fi
-
-STAGE_OUTPUT="$RAW_OUTPUT"
-[ "$STAGE" = "STG" ] && STAGE_OUTPUT="$STG_OUTPUT"
-
-
-# 各表的筆數與水位線，每行「表名｜內容」。取自 raw 與 stg 印的這幾種行：
+# 從 stdin 讀 raw 與 stg 的輸出，整理成各表的筆數與水位線，每行「表名｜內容」。
+# 取自這幾種行：
 #
 #   ───── session ─────
 #   📈 上次同步至 2026-10-27 23:58:12.123000（台北），回溯 30 天 → ...
@@ -200,7 +145,7 @@ STAGE_OUTPUT="$RAW_OUTPUT"
 # RAW 的表名是 citrix.<table key>（見 config/raw_tables.py）。
 # 水位線只留到秒。
 table_stats() {
-    cat "$RAW_OUTPUT" "$STG_OUTPUT" | awk '
+    awk '
         /───── .* ─────/ {
             key = $0
             sub(/.*───── /, "", key)
@@ -230,57 +175,6 @@ table_stats() {
             print a[1] "｜" a[2]
         }
     '
-}
-
-# raw.main 結束前印的失敗清單，例如 ['session', 'connection']
-failed_tables() {
-    grep -oE '以下表同步失敗：\[.*\]' "$RAW_OUTPUT" | tail -n 1 \
-        | sed -E "s/.*\[(.*)\]/\1/; s/'//g"
-}
-
-# 容器有沒有在跑，失敗通知裡用來說明原因
-container_state() {
-    local running
-
-    running="$(docker inspect -f '{{.State.Running}}' "$CONTAINER" 2>/dev/null)"
-
-    case "$running" in
-        true)  echo "執行中" ;;
-        false) echo "已停止" ;;
-        *)     echo "不存在" ;;
-    esac
-}
-
-# 通知的除錯資訊：主機、時間、log 路徑、最後幾行輸出。
-# 放進通知預設收合的區塊，不擋在白話的結論前面。
-debug_info() {
-    echo "主機｜${HOST_NAME}"
-    echo "時間｜$(timestamp)"
-    echo "log｜${LOG_PATH}"
-    echo "階段｜${STAGE}"
-    echo "離開碼｜${RC}"
-
-    local line
-    for line in "$@"; do
-        echo "$line"
-    done
-
-    echo ""
-    echo "最後幾行輸出："
-    echo '```'
-    if [ -s "$STAGE_OUTPUT" ]; then
-        tail -n 8 "$STAGE_OUTPUT"
-    else
-        echo "（沒有輸出）"
-    fi
-    echo '```'
-}
-
-# 要提早補跑時，在主機上執行的指令
-manual_command() {
-    echo '```'
-    echo "flock -n /tmp/citrix.lockfile ${SCRIPT_DIR}/run_etl.sh etl"
-    echo '```'
 }
 
 # 失敗標記：每班失敗時寫進 log 的那一行，週報靠它計數
@@ -335,34 +229,191 @@ resolve_current_status() {
 #
 # 每週一跑完 etl 後送出，不論這一班成敗：它的用途就是「每週都要出現」，
 # 某個星期一沒收到就代表排程或主機有問題（例如 flock 一直拿不到鎖）。
+# 也可以用 weekly-report 手動送一則。
 #
 # 送 INFO（藍色）而不是 OK（綠色）：週報只代表排程還活著，
 # 成敗看最後那行上了色的「目前狀態」。
 #
 # 統計區間是 6 天前的 00:00 起，也就是上週二到今天這 7 班，
 # 不會和上一則週報重複算到上週一那班。
+#
+# 用法：send_weekly_report <最近一班的開始時間> <各表數字（table_stats 的輸出）>
 # ==============================
 send_weekly_report() {
+    local last_run="$1" stats="$2"
     local since_day
 
     since_day="$(date -d '6 days ago' '+%F')"
 
     resolve_current_status
 
+    if [ -z "$stats" ]; then
+        stats="log 裡找不到最近一班的紀錄"
+    fi
+
     notify_or_queue INFO "Citrix ETL 週報" \
 "統計區間：${since_day} 起
 
-## 📈 本班各表筆數與水位線
-${STATS}
+## 📈 最近一班各表筆數與水位線
+最近一班｜${last_run:-（無）}
+${stats}
 
 ## 💥 本週排程沒跑完
 每日 ETL｜$(count_failures_since "$since_day") 次" \
-"$(debug_info)" \
+"主機｜${HOST_NAME}
+時間｜$(timestamp)
+log｜${LOG_DIR}/etl_YYYY-MM-DD.log" \
 "$STATUS_LEVEL" "$STATUS_TEXT"
 }
 
+# 每班 etl 開始時寫進 log 的標記，weekly-report 靠它找出最近一班的輸出
+RUN_MARKER="▶️ run_etl etl 開始"
 
-STATS="$(table_stats)"
+# 最近一班 etl 的輸出：最新一個含有開始標記的 log 檔裡，最後一個標記之後的內容。
+# 第一行是標記本身，開頭的時間戳記就是那一班的開始時間。
+last_run_output() {
+    local f
+
+    f="$(grep -lF "$RUN_MARKER" "${LOG_DIR}"/etl_*.log 2>/dev/null | sort | tail -n 1)"
+    [ -n "$f" ] || return 0
+
+    awk -v marker="$RUN_MARKER" '
+        index($0, marker) > 0 { buf = "" }
+        { buf = buf $0 "\n" }
+        END { printf "%s", buf }
+    ' "$f"
+}
+
+# ==============================
+# flush：只重送暫存的通知
+#
+# 不碰容器也不連 DB。cron 與 etl 共用同一把鎖，etl 正在執行時這班
+# 直接跳過：etl 跑完自己會重送。
+# ==============================
+if [ "$JOB" = "flush" ]; then
+    flush_pending
+    exit 0
+fi
+
+
+# ==============================
+# weekly-report：手動送一則週報
+#
+# 不重跑 ETL，也不碰容器、不連 DB：各表數字取自 log 裡最近一班的輸出。
+# ==============================
+if [ "$JOB" = "weekly-report" ]; then
+    LAST_RUN_OUTPUT="$(last_run_output)"
+
+    send_weekly_report \
+        "$(head -n 1 <<< "$LAST_RUN_OUTPUT" | grep -oE '^\[[0-9: -]+\]' | tr -d '[]')" \
+        "$(table_stats <<< "$LAST_RUN_OUTPUT")"
+
+    flush_pending
+    exit 0
+fi
+
+
+# ==============================
+# etl
+# ==============================
+RUN_STARTED="$(timestamp)"
+echo "[${RUN_STARTED}] ${RUN_MARKER}"
+
+RAW_OUTPUT="$(mktemp)"
+STG_OUTPUT="$(mktemp)"
+trap 'rm -f "$RAW_OUTPUT" "$STG_OUTPUT"' EXIT
+
+# run_stage <輸出檔> <python 模組與參數...>
+#
+# 回傳 docker exec 的離開碼：
+#   0    成功
+#   1    程式出錯（raw 是有表同步失敗，其餘表照樣寫入）
+#   124  超過時間上限被中止
+#   其他 容器不存在、沒在跑等 docker exec 本身的錯誤
+#
+# python -u 關閉 stdout 緩衝。輸出導向檔案時是塊緩衝（8KB），
+# 行程若被中途中止，緩衝區裡的 log 會整批消失。
+run_stage() {
+    local out="$1"
+    shift
+
+    timeout "$CLIENT_TIMEOUT" \
+        docker exec "$CONTAINER" timeout "$RUN_TIMEOUT" python -u -m "$@" 2>&1 \
+        | tee "$out"
+
+    # 要的是 docker exec 的離開碼，不是 tee 的
+    return "${PIPESTATUS[0]}"
+}
+
+# raw 與 stg 依序執行，raw 失敗就不跑 stg：避免拿半套的來源資料去
+# 覆蓋已經正確的 stg。RAW 是差異 upsert、STG 是整表重建，都可重跑。
+STAGE="RAW"
+run_stage "$RAW_OUTPUT" raw.main all
+RC=$?
+
+if [ "$RC" -eq 0 ]; then
+    STAGE="STG"
+    run_stage "$STG_OUTPUT" stg.main
+    RC=$?
+fi
+
+STAGE_OUTPUT="$RAW_OUTPUT"
+[ "$STAGE" = "STG" ] && STAGE_OUTPUT="$STG_OUTPUT"
+
+
+# raw.main 結束前印的失敗清單，例如 ['session', 'connection']
+failed_tables() {
+    grep -oE '以下表同步失敗：\[.*\]' "$RAW_OUTPUT" | tail -n 1 \
+        | sed -E "s/.*\[(.*)\]/\1/; s/'//g"
+}
+
+# 容器有沒有在跑，失敗通知裡用來說明原因
+container_state() {
+    local running
+
+    running="$(docker inspect -f '{{.State.Running}}' "$CONTAINER" 2>/dev/null)"
+
+    case "$running" in
+        true)  echo "執行中" ;;
+        false) echo "已停止" ;;
+        *)     echo "不存在" ;;
+    esac
+}
+
+# 通知的除錯資訊：主機、時間、log 路徑、最後幾行輸出。
+# 放進通知預設收合的區塊，不擋在白話的結論前面。
+debug_info() {
+    echo "主機｜${HOST_NAME}"
+    echo "時間｜$(timestamp)"
+    echo "log｜${LOG_PATH}"
+    echo "階段｜${STAGE}"
+    echo "離開碼｜${RC}"
+
+    local line
+    for line in "$@"; do
+        echo "$line"
+    done
+
+    echo ""
+    echo "最後幾行輸出："
+    echo '```'
+    if [ -s "$STAGE_OUTPUT" ]; then
+        tail -n 8 "$STAGE_OUTPUT"
+    else
+        echo "（沒有輸出）"
+    fi
+    echo '```'
+}
+
+# 要提早補跑時，在主機上執行的指令
+manual_command() {
+    echo '```'
+    echo "flock -n /tmp/citrix.lockfile ${SCRIPT_DIR}/run_etl.sh etl"
+    echo '```'
+}
+
+
+STATS="$(cat "$RAW_OUTPUT" "$STG_OUTPUT" | table_stats)"
 
 if [ "$RC" -eq 0 ]; then
     # ------------------------------
@@ -425,7 +476,7 @@ fi
 # 同一天兩則都送，少了任何一則都會讓人以為漏了。
 # 放在失敗與恢復之後，本週失敗次數與目前狀態才會包含這一班。
 if [ "$(date '+%u')" -eq "$REPORT_WEEKDAY" ]; then
-    send_weekly_report
+    send_weekly_report "$RUN_STARTED" "$STATS"
 fi
 
 # 先前送不出去的通知
