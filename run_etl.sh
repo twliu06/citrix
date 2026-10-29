@@ -132,6 +132,35 @@ purge_old_logs() {
 }
 
 
+# 列出檔名日期在起始日期（含）之後、內容符合樣式的 log 檔，依日期排序。
+#
+# 用法：logs_matching <起始日期> <樣式（grep -E）>
+#
+# 週報的除錯資訊用它列出出問題那幾天的檔名，可以直接複製去查。
+logs_matching() {
+    local since="$1" pattern="$2" f day
+
+    for f in "${LOG_DIR}"/etl_*.log; do
+        [ -r "$f" ] || continue
+
+        day="$(basename "$f" .log)"
+        day="${day#etl_}"
+
+        if [[ "$day" =~ ^[0-9]{4}-[0-9]{2}-[0-9]{2}$ ]] \
+            && ! [[ "$day" < "$since" ]] \
+            && grep -qE -- "$pattern" "$f"; then
+            echo "$f"
+        fi
+    done
+}
+
+# 週報除錯資訊裡「失敗那天的 log」那幾行，從 stdin 讀檔案清單。
+# 第一行帶名稱，其餘名稱留空，展開後對齊成同一欄。清單是空的就不輸出。
+failed_logs_lines() {
+    sed '1s/^/失敗那天的 log｜/; 2,$s/^/｜/'
+}
+
+
 # 從 stdin 讀 raw 與 stg 的輸出，整理成各表的筆數與水位線，每行「表名｜內容」。
 # 取自這幾種行：
 #
@@ -237,11 +266,11 @@ resolve_current_status() {
 # 統計區間是 6 天前的 00:00 起，也就是上週二到今天這 7 班，
 # 不會和上一則週報重複算到上週一那班。
 #
-# 用法：send_weekly_report <最近一班的開始時間> <各表數字（table_stats 的輸出）>
+# 用法：send_weekly_report <最近一班的開始時間> <各表數字（table_stats 的輸出）> <最近一班的 log>
 # ==============================
 send_weekly_report() {
-    local last_run="$1" stats="$2"
-    local since_day
+    local last_run="$1" stats="$2" last_log="$3"
+    local since_day details failed_logs
 
     since_day="$(date -d '6 days ago' '+%F')"
 
@@ -249,6 +278,18 @@ send_weekly_report() {
 
     if [ -z "$stats" ]; then
         stats="log 裡找不到最近一班的紀錄"
+    fi
+
+    details="主機｜${HOST_NAME}
+時間｜$(timestamp)
+最近一班 log｜${last_log:-（無）}"
+
+    # 本週失敗的那幾天
+    failed_logs="$(logs_matching "$since_day" "$FAIL_MARKER" | failed_logs_lines)"
+
+    if [ -n "$failed_logs" ]; then
+        details="${details}
+${failed_logs}"
     fi
 
     notify_or_queue INFO "Citrix ETL 週報" \
@@ -260,21 +301,25 @@ ${stats}
 
 ## 💥 本週排程沒跑完
 每日 ETL｜$(count_failures_since "$since_day") 次" \
-"主機｜${HOST_NAME}
-時間｜$(timestamp)
-log｜${LOG_DIR}/etl_YYYY-MM-DD.log" \
+"$details" \
 "$STATUS_LEVEL" "$STATUS_TEXT"
 }
 
 # 每班 etl 開始時寫進 log 的標記，weekly-report 靠它找出最近一班的輸出
 RUN_MARKER="▶️ run_etl etl 開始"
 
-# 最近一班 etl 的輸出：最新一個含有開始標記的 log 檔裡，最後一個標記之後的內容。
-# 第一行是標記本身，開頭的時間戳記就是那一班的開始時間。
-last_run_output() {
-    local f
+# 最近一班 etl 寫在哪個 log：最新一個含有開始標記的檔。
+last_run_log() {
+    grep -lF "$RUN_MARKER" "${LOG_DIR}"/etl_*.log 2>/dev/null | sort | tail -n 1
+}
 
-    f="$(grep -lF "$RUN_MARKER" "${LOG_DIR}"/etl_*.log 2>/dev/null | sort | tail -n 1)"
+# 最近一班 etl 的輸出：該檔裡最後一個開始標記之後的內容。
+# 第一行是標記本身，開頭的時間戳記就是那一班的開始時間。
+#
+# 用法：last_run_output <最近一班的 log>
+last_run_output() {
+    local f="$1"
+
     [ -n "$f" ] || return 0
 
     awk -v marker="$RUN_MARKER" '
@@ -302,11 +347,13 @@ fi
 # 不重跑 ETL，也不碰容器、不連 DB：各表數字取自 log 裡最近一班的輸出。
 # ==============================
 if [ "$JOB" = "weekly-report" ]; then
-    LAST_RUN_OUTPUT="$(last_run_output)"
+    LAST_RUN_LOG="$(last_run_log)"
+    LAST_RUN_OUTPUT="$(last_run_output "$LAST_RUN_LOG")"
 
     send_weekly_report \
         "$(head -n 1 <<< "$LAST_RUN_OUTPUT" | grep -oE '^\[[0-9: -]+\]' | tr -d '[]')" \
-        "$(table_stats <<< "$LAST_RUN_OUTPUT")"
+        "$(table_stats <<< "$LAST_RUN_OUTPUT")" \
+        "$LAST_RUN_LOG"
 
     flush_pending
     exit 0
@@ -476,7 +523,7 @@ fi
 # 同一天兩則都送，少了任何一則都會讓人以為漏了。
 # 放在失敗與恢復之後，本週失敗次數與目前狀態才會包含這一班。
 if [ "$(date '+%u')" -eq "$REPORT_WEEKDAY" ]; then
-    send_weekly_report "$RUN_STARTED" "$STATS"
+    send_weekly_report "$RUN_STARTED" "$STATS" "$LOG_PATH"
 fi
 
 # 先前送不出去的通知
