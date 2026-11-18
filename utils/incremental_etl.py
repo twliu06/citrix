@@ -25,7 +25,7 @@ log 更看不出到底有沒有東西真的改變。改用 upsert 之後：
     - 可以明確報出新增 / 更新 / 未變動各幾筆
 """
 
-from datetime import timedelta
+from datetime import datetime, timedelta
 
 from psycopg2.extras import execute_values
 
@@ -54,8 +54,8 @@ def get_target_columns(cur, table_name: str) -> dict[str, str]:
     return {row[0]: row[1] for row in cur.fetchall()}
 
 
-def fetch_source_rows(original_table, inc_key, window_start, columns, print_log):
-    """從 Citrix 來源撈資料，回傳 (欄位名 list, 資料列 list)"""
+def fetch_source_rows(site, original_table, inc_key, window_start, columns, print_log):
+    """從指定站台的 Citrix 來源撈資料，回傳 (欄位名 list, 資料列 list)"""
     col_list = ", ".join(f"[{c}]" for c in columns)
     sql = f"SELECT {col_list} FROM {original_table}"
 
@@ -64,7 +64,7 @@ def fetch_source_rows(original_table, inc_key, window_start, columns, print_log)
         sql += f" WHERE [{inc_key}] >= ?"
         params = (window_start,)
 
-    with get_citrix_conn() as conn:
+    with get_citrix_conn(site) as conn:
         cur = conn.cursor()
         cur.execute(sql, params)
         names = [c[0] for c in cur.description]
@@ -75,13 +75,25 @@ def fetch_source_rows(original_table, inc_key, window_start, columns, print_log)
     return names, rows
 
 
+# RAW 時間字串的格式，與 migration 用的 to_char(..., 'YYYY-MM-DD HH24:MI:SS.US') 相同。
+# 固定 6 位小數：str(datetime) 在微秒為 0 時會省略小數，同一個時間會有兩種寫法，
+# upsert 的比對就會把沒變的列誤判成有變。
+RAW_TIME_FORMAT = "%Y-%m-%d %H:%M:%S.%f"
+
+
 def coerce(value, data_type):
     """
-    RAW 層型態：時間欄位轉成台北時間，其餘轉字串。
+    RAW 層型態：來源時間一律轉成台北時間，其餘轉字串。
 
     Citrix 來源的時間欄位全部是 UTC 且無時區標記，這裡一律轉成
     Asia/Taipei —— 倉儲內禁止儲存 UTC，避免同一列裡 created_at
     是台北、來源欄位卻是 UTC 的混用情況。
+
+    時間欄位依目標欄位型態分兩種：
+      - 水位線 ModifiedDate 是 TIMESTAMP(6)，直接寫入 datetime
+      - 其餘時間欄位是 TEXT，寫入固定格式的字串
+
+    是不是時間看來源值的型別，不看目標欄位：目標是 TEXT 時看不出來。
 
     非時間欄位一定要先轉成 str，PostgreSQL 不會自動把其他型別
     指派給 text 欄位。
@@ -89,8 +101,13 @@ def coerce(value, data_type):
     if value is None:
         return None
 
-    if data_type.startswith("timestamp") or data_type == "date":
-        return utc_to_taipei(value)
+    if isinstance(value, datetime):
+        value = utc_to_taipei(value)
+
+        if data_type.startswith("timestamp"):
+            return value
+
+        return value.strftime(RAW_TIME_FORMAT)
 
     return str(value)
 
@@ -180,7 +197,7 @@ def run_incremental_etl(table_key, cfg, print_log, lookback_days=None):
             #    送過去之前必須轉回 UTC。少了這一步等於用「未來 8 小時」
             #    的條件去查，會查不到任何資料而讓管線靜默停擺。
             names, rows = fetch_source_rows(
-                original_table, inc_key, taipei_to_utc(window_start),
+                cfg["site"], original_table, inc_key, taipei_to_utc(window_start),
                 columns, print_log
             )
 

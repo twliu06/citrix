@@ -1,48 +1,39 @@
 from utils.db_raw import get_conn
 
-TABLE_NAME = "citrix.session"
-TABLE_COMMENT = "工作階段紀錄（來源：MonitorData.Session）"
+TABLE_NAME = "citrix.administration_user_account"
+TABLE_COMMENT = "Citrix 行政系統使用者清單（來源：CitrixFCU01Monitoring.MonitorData.User）"
 
 # RAW 層：
 #   1. 欄位名稱完全照抄來源基底表（SQL Server 駝峰式），
 #      PostgreSQL 需以雙引號保留大小寫
-#   2. 時間欄位用 TIMESTAMP(6)，其餘一律 TEXT
+#   2. 來源欄位一律 TEXT，時間欄位存台北時間的字串（YYYY-MM-DD HH:MM:SS.ffffff）；
+#      唯一例外是增量水位線 ModifiedDate 用 TIMESTAMP(6)，存成 TEXT 會退化成字串比較
 #   3. 除系統欄位外皆可為空 —— RAW 的職責是收得進來，不是擋資料
 #   4. 欄位順序照抄來源
 #
 # (欄位名稱, 型別, NOT NULL, 欄位註解)
 COLUMNS = [
-    ("id", "BIGSERIAL PRIMARY KEY", True, "工作階段紀錄識別碼"),
+    ("id", "BIGSERIAL PRIMARY KEY", True, "使用者清單識別碼"),
 
-    ("SessionKey",                "TEXT",          False, "工作階段識別碼"),
-    ("StartDate",                 "TIMESTAMP(6)",  False, "工作階段開始時間"),
-    ("LogOnDuration",             "TEXT",          False, "登入耗時（毫秒）"),
-    ("EndDate",                   "TIMESTAMP(6)",  False, "工作階段結束時間"),
-    ("ExitCode",                  "TEXT",          False, "結束代碼"),
-    ("FailureDate",               "TIMESTAMP(6)",  False, "失敗發生時間"),
-    ("ConnectionState",           "TEXT",          False, "連線狀態代碼"),
-    ("ConnectionStateChangeDate", "TIMESTAMP(6)",  False, "連線狀態變更時間"),
-    ("LifecycleState",            "TEXT",          False, "生命週期狀態代碼"),
-    ("CurrentConnectionId",       "TEXT",          False, "目前連線識別碼"),
-    ("UserId",                    "TEXT",          False, "使用者識別碼"),
-    ("MachineId",                 "TEXT",          False, "機器識別碼"),
-    ("SessionType",               "TEXT",          False, "工作階段類型代碼（應用程式／桌面）"),
-    ("IsAnonymous",               "TEXT",          False, "是否為匿名工作階段"),
-    ("CreatedDate",               "TIMESTAMP(6)",  False, "來源建立時間"),
-    ("ModifiedDate",              "TIMESTAMP(6)",  False, "來源更新時間，增量抽取依據"),
-    ("FailureId",                 "TEXT",          False, "失敗原因代碼"),
-    ("SessionIdleTime",           "TIMESTAMP(6)",  False, "閒置時間"),
+    ("Id",           "TEXT",          False, "來源使用者識別碼"),
+    ("Sid",          "TEXT",          False, "Windows 安全識別碼"),
+    ("Upn",          "TEXT",          False, "使用者主要名稱（UPN）"),
+    ("UserName",     "TEXT",          False, "使用者帳號（學號／職員編號）"),
+    ("FullName",     "TEXT",          False, "使用者姓名"),
+    ("Domain",       "TEXT",          False, "網域"),
+    ("CreatedDate",  "TEXT",          False, "來源建立時間"),
+    ("ModifiedDate", "TIMESTAMP(6)",  False, "來源更新時間，增量抽取依據"),
 
     ("created_at", "TIMESTAMP(6)", True, "資料建立時間"),
     ("updated_at", "TIMESTAMP(6)", True, "資料更新時間"),
 ]
 
 # 來源自然鍵 —— 增量 upsert 的比對依據
-UNIQUE_KEYS = ["SessionKey"]
+UNIQUE_KEYS = ["Id"]
 
 # 增量抽取的水位線查詢
 INDEXES = [
-    ("idx_session_modified", ['"ModifiedDate"']),
+    ("idx_administration_user_account_modified_date", ['"ModifiedDate"']),
 ]
 
 
@@ -68,7 +59,7 @@ def build_index_sql() -> list[str]:
     # 用 unique index 而非 constraint：CREATE ... IF NOT EXISTS 可重複執行，
     # ON CONFLICT 也吃 unique index
     stmts = [
-        f"CREATE UNIQUE INDEX IF NOT EXISTS uq_session_key "
+        f"CREATE UNIQUE INDEX IF NOT EXISTS uk_administration_user_account_id "
         f"ON {TABLE_NAME} ({key_cols});"
     ]
 

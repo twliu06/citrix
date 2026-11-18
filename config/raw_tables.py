@@ -1,7 +1,15 @@
 """
 RAW 層來源表設定
 
-來源：CitrixFCU02Monitoring（SQL Server）的 MonitorData schema
+來源：三個 Citrix 站台的監控資料庫（SQL Server）的 MonitorData schema。
+三個站台的表結構相同，各自一組 RAW 表，以表名前綴區分站台。
+
+⚠️ 為什麼三個站台不放進同一組表
+------------------------------------------------------------------
+各站台的識別碼（User.Id、Connection.Id 等）是各自編的流水號，
+同一個 Id 在不同站台是不同的人或紀錄，放在一起 upsert 會互相覆蓋。
+水位線也必須各站台分開算：放在一起時，某個站台斷線期間另一個站台
+仍會把水位線往前推，斷線那段就會被跳過。
 
 ⚠️ incremental_key 為什麼是 ModifiedDate 而不是 CreatedDate
 ------------------------------------------------------------------
@@ -18,42 +26,37 @@ Citrix 的資料列會就地更新 —— 例如 session 開始時先寫入一�
 上限存在的理由是避免無意義的大範圍掃描，不是資料安全。
 """
 
+# 站台前綴 → 用途與來源 DB
+#
+# 連線資訊放在 .env：CITRIX_<前綴大寫>_HOST、CITRIX_<前綴大寫>_DB，
+# 帳號密碼三站共用 CITRIX_USER、CITRIX_PASSWORD。
+CITRIX_SITES = {
+    "administration": "行政系統（校務系統、櫃台服務系統、行動辦公室），CitrixFCU01Monitoring",
+    "statistics_computing": "統計與數值計算軟體（SPSS、SAS、MATLAB 等），CitrixFCU02Monitoring",
+    "design_engineering": "設計與工程軟體（AutoCAD、SOLIDWORKS、ANSYS 等，GPU 主機），CitrixFCUVDIMonitoring1",
+}
+
+# 來源表 → RAW 表名（不含站台前綴）與自然鍵
+SOURCE_TABLES = {
+    "application":        ("MonitorData.Application",         ["Id"]),
+    "application_launch": ("MonitorData.ApplicationInstance", ["Id"]),
+    "session":            ("MonitorData.Session",             ["SessionKey"]),
+    "user_account":       ("MonitorData.[User]",              ["Id"]),
+    "connection":         ("MonitorData.Connection",          ["Id"]),
+}
+
+# table key 為 <站台前綴>_<表名>，例如 administration_session，
+# 對應 RAW 表 citrix.administration_session
 RAW_TABLES = {
-    "application": {
-        "source": "citrix",
-        "original_table": "MonitorData.Application",
-        "target_table": "citrix.application",
-        "key_cols": ["Id"],
+    f"{site}_{table}": {
+        "site": site,
+        "original_table": original_table,
+        "target_table": f"citrix.{site}_{table}",
+        "key_cols": key_cols,
         "incremental_key": "ModifiedDate",
-    },
-    "application_launch": {
-        "source": "citrix",
-        "original_table": "MonitorData.ApplicationInstance",
-        "target_table": "citrix.application_launch",
-        "key_cols": ["Id"],
-        "incremental_key": "ModifiedDate",
-    },
-    "session": {
-        "source": "citrix",
-        "original_table": "MonitorData.Session",
-        "target_table": "citrix.session",
-        "key_cols": ["SessionKey"],
-        "incremental_key": "ModifiedDate",
-    },
-    "user_account": {
-        "source": "citrix",
-        "original_table": "MonitorData.[User]",
-        "target_table": "citrix.user_account",
-        "key_cols": ["Id"],
-        "incremental_key": "ModifiedDate",
-    },
-    "connection": {
-        "source": "citrix",
-        "original_table": "MonitorData.Connection",
-        "target_table": "citrix.connection",
-        "key_cols": ["Id"],
-        "incremental_key": "ModifiedDate",
-    },
+    }
+    for site in CITRIX_SITES
+    for table, (original_table, key_cols) in SOURCE_TABLES.items()
 }
 
 # 回溯視窗預設天數

@@ -1,14 +1,15 @@
 """
-RAW 層 ETL 主程式（五張表共用）
+RAW 層 ETL 主程式（三個站台、各五張表共用）
 
 用法：
-    python -m raw.main all                  全部五張
-    python -m raw.main session connection   指定表
+    python -m raw.main all                          全部站台、全部表
+    python -m raw.main administration               指定站台的五張表
+    python -m raw.main administration_session       指定表（table key）
 """
 
 import sys
 
-from config.raw_tables import RAW_TABLES
+from config.raw_tables import CITRIX_SITES, RAW_TABLES
 from utils.incremental_etl import run_incremental_etl
 from utils.logger import get_logger
 
@@ -20,8 +21,18 @@ def main(table_keys=None, all_tables=False):
         table_keys = list(RAW_TABLES.keys())
         print_log(f"🚀 將跑 RAW_TABLES 全部 {len(table_keys)} 張表")
     elif not table_keys:
-        print_log("⚠️ 請指定要跑的 table key 或使用 all")
+        print_log("⚠️ 請指定要跑的 table key、站台前綴或使用 all")
         return
+    else:
+        # 站台前綴展開成該站台的五張表
+        table_keys = [
+            key
+            for arg in table_keys
+            for key in (
+                [k for k, c in RAW_TABLES.items() if c["site"] == arg]
+                if arg in CITRIX_SITES else [arg]
+            )
+        ]
 
     failed = []
 
@@ -55,9 +66,14 @@ if __name__ == "__main__":
         main(table_keys=args)
     else:
         print("用法:")
-        print("  python -m raw.main all                  全部五張")
-        print("  python -m raw.main session connection   指定表")
+        print("  python -m raw.main all                          全部站台、全部表")
+        print("  python -m raw.main administration               指定站台的五張表")
+        print("  python -m raw.main administration_session       指定表")
+        print()
+        print("可用的站台前綴:")
+        for site in CITRIX_SITES:
+            print(f"  {site}")
         print()
         print("可用的 table key:")
         for k, v in RAW_TABLES.items():
-            print(f"  {k:<20} ← {v['original_table']}")
+            print(f"  {k:<40} ← {v['original_table']}")

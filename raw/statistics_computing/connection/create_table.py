@@ -1,12 +1,13 @@
 from utils.db_raw import get_conn
 
-TABLE_NAME = "citrix.connection"
-TABLE_COMMENT = "連線紀錄（來源：MonitorData.Connection）"
+TABLE_NAME = "citrix.statistics_computing_connection"
+TABLE_COMMENT = "Citrix 統計與數值計算軟體連線紀錄（來源：CitrixFCU02Monitoring.MonitorData.Connection）"
 
 # RAW 層：
 #   1. 欄位名稱完全照抄來源基底表（SQL Server 駝峰式），
 #      PostgreSQL 需以雙引號保留大小寫
-#   2. 時間欄位用 TIMESTAMP(6)，其餘一律 TEXT
+#   2. 來源欄位一律 TEXT，時間欄位存台北時間的字串（YYYY-MM-DD HH:MM:SS.ffffff）；
+#      唯一例外是增量水位線 ModifiedDate 用 TIMESTAMP(6)，存成 TEXT 會退化成字串比較
 #   3. 除系統欄位外皆可為空 —— RAW 的職責是收得進來，不是擋資料
 #   4. 欄位順序照抄來源
 #
@@ -26,30 +27,30 @@ COLUMNS = [
     ("IsReconnect",               "TEXT",          False, "是否為重新連線"),
     ("IsSecureIca",               "TEXT",          False, "是否使用 SecureICA 加密"),
     ("Protocol",                  "TEXT",          False, "連線協定"),
-    ("LogOnStartDate",            "TIMESTAMP(6)",  False, "登入開始時間"),
-    ("LogOnEndDate",              "TIMESTAMP(6)",  False, "登入結束時間"),
+    ("LogOnStartDate",            "TEXT",          False, "登入開始時間"),
+    ("LogOnEndDate",              "TEXT",          False, "登入結束時間"),
     ("BrokeringDuration",         "TEXT",          False, "代理配發耗時（毫秒）"),
-    ("BrokeringDate",             "TIMESTAMP(6)",  False, "代理配發時間"),
+    ("BrokeringDate",             "TEXT",          False, "代理配發時間"),
     ("DisconnectCode",            "TEXT",          False, "中斷連線代碼"),
-    ("DisconnectDate",            "TIMESTAMP(6)",  False, "中斷連線時間"),
-    ("VMStartStartDate",          "TIMESTAMP(6)",  False, "虛擬機開機開始時間"),
-    ("VMStartEndDate",            "TIMESTAMP(6)",  False, "虛擬機開機結束時間"),
-    ("ClientSessionValidateDate", "TIMESTAMP(6)",  False, "用戶端工作階段驗證時間"),
-    ("ServerSessionValidateDate", "TIMESTAMP(6)",  False, "伺服器工作階段驗證時間"),
-    ("EstablishmentDate",         "TIMESTAMP(6)",  False, "連線建立時間"),
-    ("HdxStartDate",              "TIMESTAMP(6)",  False, "HDX 連線開始時間"),
-    ("HdxEndDate",                "TIMESTAMP(6)",  False, "HDX 連線結束時間"),
+    ("DisconnectDate",            "TEXT",          False, "中斷連線時間"),
+    ("VMStartStartDate",          "TEXT",          False, "虛擬機開機開始時間"),
+    ("VMStartEndDate",            "TEXT",          False, "虛擬機開機結束時間"),
+    ("ClientSessionValidateDate", "TEXT",          False, "用戶端工作階段驗證時間"),
+    ("ServerSessionValidateDate", "TEXT",          False, "伺服器工作階段驗證時間"),
+    ("EstablishmentDate",         "TEXT",          False, "連線建立時間"),
+    ("HdxStartDate",              "TEXT",          False, "HDX 連線開始時間"),
+    ("HdxEndDate",                "TEXT",          False, "HDX 連線結束時間"),
     ("AuthenticationDuration",    "TEXT",          False, "認證耗時（毫秒）"),
-    ("GpoStartDate",              "TIMESTAMP(6)",  False, "群組原則套用開始時間"),
-    ("GpoEndDate",                "TIMESTAMP(6)",  False, "群組原則套用結束時間"),
-    ("LogOnScriptsStartDate",     "TIMESTAMP(6)",  False, "登入指令碼開始時間"),
-    ("LogOnScriptsEndDate",       "TIMESTAMP(6)",  False, "登入指令碼結束時間"),
-    ("ProfileLoadStartDate",      "TIMESTAMP(6)",  False, "使用者設定檔載入開始時間"),
-    ("ProfileLoadEndDate",        "TIMESTAMP(6)",  False, "使用者設定檔載入結束時間"),
-    ("InteractiveStartDate",      "TIMESTAMP(6)",  False, "互動階段開始時間"),
-    ("InteractiveEndDate",        "TIMESTAMP(6)",  False, "互動階段結束時間"),
+    ("GpoStartDate",              "TEXT",          False, "群組原則套用開始時間"),
+    ("GpoEndDate",                "TEXT",          False, "群組原則套用結束時間"),
+    ("LogOnScriptsStartDate",     "TEXT",          False, "登入指令碼開始時間"),
+    ("LogOnScriptsEndDate",       "TEXT",          False, "登入指令碼結束時間"),
+    ("ProfileLoadStartDate",      "TEXT",          False, "使用者設定檔載入開始時間"),
+    ("ProfileLoadEndDate",        "TEXT",          False, "使用者設定檔載入結束時間"),
+    ("InteractiveStartDate",      "TEXT",          False, "互動階段開始時間"),
+    ("InteractiveEndDate",        "TEXT",          False, "互動階段結束時間"),
     ("SessionKey",                "TEXT",          False, "工作階段識別碼"),
-    ("CreatedDate",               "TIMESTAMP(6)",  False, "來源建立時間"),
+    ("CreatedDate",               "TEXT",          False, "來源建立時間"),
     ("ModifiedDate",              "TIMESTAMP(6)",  False, "來源更新時間，增量抽取依據"),
 
     ("created_at", "TIMESTAMP(6)", True, "資料建立時間"),
@@ -61,7 +62,7 @@ UNIQUE_KEYS = ["Id"]
 
 # 增量抽取的水位線查詢
 INDEXES = [
-    ("idx_connection_modified", ['"ModifiedDate"']),
+    ("idx_statistics_computing_connection_modified_date", ['"ModifiedDate"']),
 ]
 
 
@@ -87,7 +88,7 @@ def build_index_sql() -> list[str]:
     # 用 unique index 而非 constraint：CREATE ... IF NOT EXISTS 可重複執行，
     # ON CONFLICT 也吃 unique index
     stmts = [
-        f"CREATE UNIQUE INDEX IF NOT EXISTS uq_connection_key "
+        f"CREATE UNIQUE INDEX IF NOT EXISTS uk_statistics_computing_connection_id "
         f"ON {TABLE_NAME} ({key_cols});"
     ]
 

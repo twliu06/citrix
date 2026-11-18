@@ -1,25 +1,39 @@
 # citrix 雲端軟體使用紀錄管線
 
-把 Citrix Virtual Apps 的應用程式使用紀錄，從監控資料庫抽進 Postgres，供 Power BI 報表「Citrix 雲端軟體」使用。
+把 Citrix Virtual Apps 三個站台的應用程式使用紀錄，從各站台的監控資料庫抽進 Postgres，供 Power BI 報表「Citrix 雲端軟體」使用。
 
 ## 🔄 資料流
 
 ```
-CitrixFCU02Monitoring (SQL Server, 140.134.136.28)
-        │  五張基底表，增量 upsert（依 ModifiedDate）
+三個站台的監控資料庫（SQL Server）
+        │  每站五張基底表，增量 upsert（依 ModifiedDate）
         ▼
-raw_cda_prod / schema citrix
-        │  五表 JOIN，型別轉換
+raw_cda_prod / schema citrix        每站一組表，以站台前綴區分
+        │  每站五表 JOIN，型別轉換
         ▼
-stg_cda_prod / schema private
+stg_cda_prod / schema private       每站一張表
         │
         ▼
 Power BI「Citrix 雲端軟體」
 ```
 
+## 🏢 站台
+
+| 站台前綴 | 用途 | 來源 DB | 主機 |
+|---|---|---|---|
+| `administration` | 行政系統：校務系統、櫃台服務系統，以及教職員的「行動辦公室」虛擬桌面 | `CitrixFCU01Monitoring` | 140.134.136.30 |
+| `statistics_computing` | 統計與數值計算軟體：SPSS、SAS、Stata、MATLAB、LabVIEW、Multisim 等 | `CitrixFCU02Monitoring` | 140.134.136.28 |
+| `design_engineering` | 設計與工程軟體（GPU 主機）：AutoCAD、Revit、SOLIDWORKS、Creo、ANSYS、ArcGIS Pro 等 | `CitrixFCUVDIMonitoring1` | 140.134.136.52 |
+
+三個站台的表結構相同，但**識別碼各自編號**：`User.Id`、`Connection.Id` 等是各站台自己的流水號，同一個 `Id` 在不同站台是不同的人或紀錄，同一個人在三個站台也會有三個不同的 `Id`。跨站台比對同一個人要用 `UserName`。
+
+部分軟體不只在一個站台發佈：校務系統、櫃台服務系統在行政系統與設計與工程軟體兩個站台都有，Office 在統計與數值計算軟體與設計與工程軟體兩個站台都有。
+
+設計與工程軟體站台有名稱看起來是測試用的設定（交付群組 `FCU-7-T`、應用程式 `Word 測試 fcu7`），RAW 與 STG 都照原樣收進來。
+
 ## ⚠️ 這個專案最重要的一件事：來源只保留 90 天
 
-Citrix 監控資料庫會自動清除過期資料，實測各粒度的保留期：
+Citrix 監控資料庫會自動清除過期資料，實測各粒度的保留期（三個站台的明細表最早都只到同一天，保留期相同）：
 
 | 資料層 | 保留 |
 |---|---|
@@ -34,21 +48,21 @@ Citrix 監控資料庫會自動清除過期資料，實測各粒度的保留期�
 
 ## 📡 來源
 
-`CitrixFCU02Monitoring` 的 `MonitorData` schema 共 72 張表，本專案只用其中 5 張：
+每個站台的 `MonitorData` schema 共 72 張表，本專案只用其中 5 張。RAW 表名為 `citrix.<站台前綴>_<表名>`，例如 `citrix.administration_session`：
 
-| 來源表 | RAW 表 | 欄位 | 自然鍵 |
+| 來源表 | RAW 表名（不含站台前綴） | 欄位 | 自然鍵 |
 |---|---|---|---|
-| `MonitorData.Application` | `citrix.application` | 11 | `Id` |
-| `MonitorData.ApplicationInstance` | `citrix.application_launch` | 7 | `Id` |
-| `MonitorData.Session` | `citrix.session` | 18 | `SessionKey` |
-| `MonitorData.User` | `citrix.user_account` | 8 | `Id` |
-| `MonitorData.Connection` | `citrix.connection` | 37 | `Id` |
+| `MonitorData.Application` | `application` | 11 | `Id` |
+| `MonitorData.ApplicationInstance` | `application_launch` | 7 | `Id` |
+| `MonitorData.Session` | `session` | 18 | `SessionKey` |
+| `MonitorData.User` | `user_account` | 8 | `Id` |
+| `MonitorData.Connection` | `connection` | 37 | `Id` |
 
 ### ⚠️ 來源是 UTC，倉儲一律存台北時間
 
 Citrix 資料庫的時間欄位全部是 UTC，而且沒有任何欄位標記時區。把 Session 起始時間按小時分組就看得出來：直接讀 DB 的值，高峰落在清晨 5–6 點、離峰在晚上 8–11 點；**+8 之後**才是合理的校園作息（下午 1–3 點主峰、晚上 8–10 點次峰、凌晨 2–7 點近乎歸零）。
 
-**倉儲內禁止儲存 UTC。** 來源的時間欄位在寫入 RAW 之前就會轉成 `Asia/Taipei`，轉換一律走 `utils/time_utils.py` 的 `utc_to_taipei()`。STG 的來源是 RAW，直接繼承台北時間，不再另外轉換。
+**倉儲內禁止儲存 UTC。** 來源的時間欄位在寫入 RAW 之前就會轉成 `Asia/Taipei`，轉換一律走 `utils/time_utils.py` 的 `utc_to_taipei()`。RAW 的時間欄位是 `TEXT`（見下方「資料表」），存的就是台北時間的字串；STG 只把字串轉回 `TIMESTAMP(6)`，不再換時區。
 
 這樣做是為了避免同一列裡混著兩種時區 —— `created_at`／`updated_at` 是 `now_taipei()` 產生的台北時間，若來源欄位保持 UTC，同一筆資料的 `app_started_at` 會比 `created_at` 早 8 小時，下游拿去比對必然出錯。
 
@@ -59,12 +73,6 @@ Citrix 資料庫的時間欄位全部是 UTC，而且沒有任何欄位標記時
 
 Session 開始時先寫入一列，結束時才回填 `EndDate`、`ExitCode`，同時 `ModifiedDate` 往後跳。所以增量水位線必須用 `ModifiedDate`，不能用 `CreatedDate` 或 `StartDate` —— 否則那些後續更新永遠抓不到。
 
-### ⚠️ 這個站台只涵蓋部分軟體
-
-FCU02 只發佈 31 個應用，以統計／工程軟體為主（SPSS、SAS、MATLAB、Minitab、Multisim、Stata、LabVIEW）。
-
-Power BI 報表上的 ACL、ANSYS、ArcGIS、Archicad、Autodesk、Creo Parametric、ETABS、校務系統、櫃台服務系統**都不在這個站台**。報表的 `concurrent_snapshot` 有 `DB` 欄位，值為 `FCU01`、`FCU02`、`FCUVDI` —— 另外兩個站台的連線資訊尚未取得。
-
 ## 🗄️ 資料表
 
 ### raw：`raw_cda_prod` / schema `citrix`
@@ -72,24 +80,34 @@ Power BI 報表上的 ACL、ANSYS、ArcGIS、Archicad、Autodesk、Creo Parametr
 欄位名稱**完全照抄來源基底表**（SQL Server 駝峰式），PostgreSQL 需以雙引號查詢：
 
 ```sql
-SELECT "SessionKey", "StartDate" FROM citrix.session;
+SELECT "SessionKey", "StartDate" FROM citrix.administration_session;
 ```
 
-型態只有兩種：**時間欄位 `TIMESTAMP(6)`（已轉台北時間），其餘一律 `TEXT`**。除 `id`、`created_at`、`updated_at` 三個系統欄位外皆可為空 —— RAW 的職責是收得進來，不是擋資料。
+型態：**來源欄位一律 `TEXT`**，時間欄位存台北時間的字串，格式固定為 `YYYY-MM-DD HH:MM:SS.ffffff`（6 位小數）。唯一例外是增量水位線 `ModifiedDate`，用 `TIMESTAMP(6)` —— 存成 `TEXT` 會退化成字串比較。轉成時間型態是 STG 的工作（`"StartDate"::TIMESTAMP(6)`）。除 `id`、`created_at`、`updated_at` 三個系統欄位外皆可為空 —— RAW 的職責是收得進來，不是擋資料。
 
-| 表 | 說明 | 筆數 |
-|---|---|---|
-| `citrix.application` | 應用程式清單 | 41 |
-| `citrix.application_launch` | 應用程式啟動紀錄 | ~2,600 |
-| `citrix.session` | 工作階段紀錄 | ~2,100 |
-| `citrix.user_account` | 使用者清單 | ~14,300 |
-| `citrix.connection` | 連線紀錄 | ~2,300 |
+每個站台各一組，共 15 張：
 
-`citrix.connection` 的 21 個時間欄位是登入流程的完整拆解：`BrokeringDate` → `VMStartStartDate/EndDate` → `HdxStartDate/EndDate` → `GpoStartDate/EndDate` → `LogOnScriptsStartDate/EndDate` → `ProfileLoadStartDate/EndDate` → `InteractiveStartDate/EndDate`。要做「登入為什麼慢」的分析不必再抽一次。
+| 表（`<站台>` 為站台前綴） | 說明 |
+|---|---|
+| `citrix.<站台>_application` | 應用程式清單 |
+| `citrix.<站台>_application_launch` | 應用程式啟動紀錄 |
+| `citrix.<站台>_session` | 工作階段紀錄 |
+| `citrix.<站台>_user_account` | 使用者清單 |
+| `citrix.<站台>_connection` | 連線紀錄 |
+
+`connection` 的 21 個時間欄位是登入流程的完整拆解：`BrokeringDate` → `VMStartStartDate/EndDate` → `HdxStartDate/EndDate` → `GpoStartDate/EndDate` → `LogOnScriptsStartDate/EndDate` → `ProfileLoadStartDate/EndDate` → `InteractiveStartDate/EndDate`。要做「登入為什麼慢」的分析不必再抽一次。
 
 ### stg：`stg_cda_prod` / schema `private`
 
-`private.citrix_software_usage` —— 五表 JOIN 後的使用明細，12 個業務欄位。
+每個站台一張，由該站台的五張 RAW 表 JOIN 而成，12 個業務欄位，三張欄位相同：
+
+| 表 | 站台 |
+|---|---|
+| `private.citrix_administration_usage` | 行政系統 |
+| `private.citrix_statistics_computing_usage` | 統計與數值計算軟體 |
+| `private.citrix_design_engineering_usage` | 設計與工程軟體 |
+
+以應用程式啟動紀錄為主體 JOIN，只有啟動過應用程式的工作階段才會出現。行政系統站台的「行動辦公室」發佈的是整個桌面，這類工作階段若沒有應用程式啟動紀錄就不在 STG，要查請讀 RAW 的 `session` 與 `connection`。
 
 **資料分級：第二級（高度敏感）。** 依《逢甲大學校務資料申請及使用作業要點》第三條第二款，一般個人資料無論是否去識別化，可直接或間接識別個人身分者屬第二級，要點明文列舉「學號」。本表 `user_identifier` 存學號／職員證號。
 
@@ -109,7 +127,7 @@ SELECT "SessionKey", "StartDate" FROM citrix.session;
 
 取數 SQL 由 Power BI 報表維護者提供並確認，本專案原樣沿用。有兩個後果要知道：
 
-**一、Session 與 Connection 是 1:N。** 使用者斷線重連會產生多筆 Connection，JOIN 未去重，同一次應用啟動會依連線數重複多列。實測 2,574 筆應用啟動會展開成 3,176 列（1.23 倍）。**「使用次數」與「使用總時間」因此會高估約 23%。** 這是來源端確認過的既有行為，維持不變。
+**一、Session 與 Connection 是 1:N。** 使用者斷線重連會產生多筆 Connection，JOIN 未去重，同一次應用啟動會依連線數重複多列。統計與數值計算軟體站台實測 2,574 筆應用啟動會展開成 3,176 列（1.23 倍）。**「使用次數」與「使用總時間」因此會高估約 23%。** 這是來源端確認過的既有行為，維持不變。
 
 **二、12 個欄位無法唯一識別一列。** 取數 SQL 未選出 `ApplicationInstance.Id`，而多進程應用（例如 WorkFlow ERP GP 系統）會在同一毫秒產生多筆 instance —— 實測某個 session 有 12 筆 `application_launch`，其中 4 筆的 12 欄完全相同。
 
@@ -133,13 +151,26 @@ COMMENT ON SCHEMA citrix IS 'Citrix 雲端軟體服務（應用程式、工作�
 ```
 
 ```bash
-docker exec citrix_etl python -m raw.application.create_table
-docker exec citrix_etl python -m raw.application_launch.create_table
-docker exec citrix_etl python -m raw.session.create_table
-docker exec citrix_etl python -m raw.user_account.create_table
-docker exec citrix_etl python -m raw.connection.create_table
-docker exec citrix_etl python -m stg.create_table
+for site in administration statistics_computing design_engineering; do
+    for t in application application_launch session user_account connection; do
+        docker exec citrix_etl python -m raw.${site}.${t}.create_table
+    done
+done
+docker exec citrix_etl python -m stg.create_table     # 三個站台的 STG 表
 ```
+
+### 從單一站台升級為三個站台（2026-11）
+
+原本只收統計與數值計算軟體站台，表名沒有站台前綴（`citrix.session`、`private.citrix_software_usage`）。升級時依序執行，少一步當晚排程就會失敗：
+
+| 步驟 | 指令 | 說明 |
+|---|---|---|
+| 1 | 依 `.env.example` 改 `.env` | `CITRIX_HOST`、`CITRIX_DB` 改名為 `CITRIX_STATISTICS_COMPUTING_HOST`、`CITRIX_STATISTICS_COMPUTING_DB`，並加上另外兩個站台 |
+| 2 | `psql -d raw_cda_prod -f deploy/migrations/2026-11-18_citrix_raw_site_prefix.sql` | 既有 RAW 表加上前綴，資料不動 |
+| 3 | `psql -d raw_cda_prod -f deploy/migrations/2026-11-18_citrix_raw_time_columns_text.sql` | 既有 RAW 表的來源時間欄位改為 `TEXT`（`ModifiedDate` 除外），值不變。須在步驟 2 之後 |
+| 4 | `psql -d stg_cda_prod -f deploy/migrations/2026-11-18_citrix_stg_site_prefix.sql` | 既有 STG 表改名。**Power BI 讀舊表名的報表會讀不到資料**，先與報表維護者約好時間 |
+| 5 | 上方「建 schema 與資料表」的 `create_table` 迴圈 | 建另外兩個站台的表，補建 STG 索引；已存在的表不受影響 |
+| 6 | `flock -n /tmp/citrix.lockfile ~/citrix/run_etl.sh etl` | 新站台第一次會全量抓回來源現有的約 90 天 |
 
 ### 同步資料
 
@@ -151,9 +182,11 @@ flock -n /tmp/citrix.lockfile ~/citrix/run_etl.sh etl
 ~/citrix/run_etl.sh weekly-report
 
 # 只看輸出，不寫 log、不送通知
-docker exec citrix_etl python -m raw.main all          # 五張表
-docker exec citrix_etl python -m raw.main session      # 指定表
-docker exec citrix_etl python -m stg.main
+docker exec citrix_etl python -m raw.main all                      # 全部站台
+docker exec citrix_etl python -m raw.main administration           # 指定站台的五張表
+docker exec citrix_etl python -m raw.main administration_session   # 指定表
+docker exec citrix_etl python -m stg.main                          # 全部站台
+docker exec citrix_etl python -m stg.main administration           # 指定站台
 ```
 
 ## 📁 專案結構
@@ -161,18 +194,20 @@ docker exec citrix_etl python -m stg.main
 ```
 citrix/
 ├── config/
-│   ├── raw_tables.py       五張來源表設定（含 incremental_key、key_cols）
+│   ├── raw_tables.py       站台清單與來源表設定（含 incremental_key、key_cols）
 │   └── stg_tables.py       STG 目標表與取數 SQL
 ├── raw/
 │   ├── main.py             共用驅動，所有表共用一支
-│   ├── application/
-│   ├── application_launch/
-│   ├── session/
-│   ├── user_account/
-│   └── connection/         各一支 create_table.py
+│   ├── administration/
+│   ├── statistics_computing/
+│   └── design_engineering/ 每個站台下各有 application、application_launch、
+│                           session、user_account、connection，各一支 create_table.py
 ├── stg/
 │   ├── main.py
-│   └── create_table.py
+│   └── create_table.py     三個站台的 STG 表
+├── deploy/
+│   ├── cron.d/citrix       排程
+│   └── migrations/         表結構變更紀錄
 ├── lib/
 │   └── notify.sh           Teams 通知與重送
 ├── utils/
@@ -182,8 +217,7 @@ citrix/
 │   ├── incremental_etl.py  RAW 增量 upsert
 │   ├── logger.py
 │   └── time_utils.py
-├── run_etl.sh              排程的執行包裝：RAW → STG、寫 log、送出通知
-└── deploy/cron.d/citrix    排程
+└── run_etl.sh              排程的執行包裝：RAW → STG、寫 log、送出通知
 ```
 
 ## ⏱️ 排程
@@ -211,7 +245,7 @@ sudo chown root:root /etc/cron.d/citrix && sudo chmod 644 /etc/cron.d/citrix
 
 > ⚠️ 檔名不能含 `.` 等特殊字元，否則同樣被整份忽略且不報錯。
 
-`raw` 與 `stg` 依序執行 —— raw 失敗就不跑 stg，避免拿半套的來源資料去覆蓋已經正確的 stg。實測一輪約 10 秒（raw 約 2 秒、stg 約 1 秒）。
+`raw` 與 `stg` 依序執行 —— raw 失敗就不跑 stg，避免拿半套的來源資料去覆蓋已經正確的 stg。只收單一站台時實測一輪約 10 秒（raw 約 2 秒、stg 約 1 秒）。行政系統站台近 90 天的工作階段數約為它的 10 倍，三個站台的實際耗時待升級後觀察。
 
 排在 01:00 的理由：避開日間使用尖峰（台北時間 13–15 時為主峰），且距離 Power BI 語意模型的更新時間（約中午 12:30）有足夠緩衝。
 
@@ -259,10 +293,10 @@ TEAMS_WEBHOOK_URL = "https://..."
 
 📈 最近一班各表筆數與水位線
 最近一班              2026-10-26 01:00:00
-citrix.session        累計 12345 筆，水位線 2026-10-26 23:58:12
-citrix.user_account   來源無新資料，水位線 2026-10-24 08:00:00
+citrix.administration_session        累計 12345 筆，水位線 2026-10-26 23:58:12
+citrix.administration_user_account   來源無新資料，水位線 2026-10-24 08:00:00
 ...
-private.citrix_...    共 6789 筆
+private.citrix_administration_usage  共 6789 筆
 
 💥 本週排程沒跑完
 每日 ETL              0 次
@@ -298,6 +332,8 @@ RAW 每次抓回「水位線往回退 30 天」的資料，依自然鍵比對：
 STG 的來源是 RAW，完整歷史都在，整表重建沒有風險。
 
 ## 🐛 來源資料已知問題
+
+以下為統計與數值計算軟體站台的實測，另外兩個站台尚未逐項確認。
 
 - **`Connection.ConnectedViaHostName` 全無有效值** —— 559 筆 NULL 加 2,160 筆 `"Unresolved"`，無法用來分析經由哪台 Gateway 進來。
 - **`Connection` 的用戶端資訊有 17.8% 為空**，幾乎完全對應 `ConnectionFailureLog` 的筆數 —— 用戶端資訊為空代表連線根本沒建立成功。

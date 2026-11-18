@@ -1,6 +1,7 @@
 #!/bin/bash
 #
-# Citrix 雲端軟體使用紀錄 ETL 的執行包裝，由 cron 呼叫。
+# Citrix 三個站台（行政系統、統計與數值計算軟體、設計與工程軟體）使用紀錄
+# ETL 的執行包裝，由 cron 呼叫。
 #
 # 用法：
 #     run_etl.sh etl      # RAW → STG，每日一班，依結果送出通知
@@ -164,11 +165,11 @@ failed_logs_lines() {
 # 從 stdin 讀 raw 與 stg 的輸出，整理成各表的筆數與水位線，每行「表名｜內容」。
 # 取自這幾種行：
 #
-#   ───── session ─────
+#   ───── administration_session ─────
 #   📈 上次同步至 2026-10-27 23:58:12.123000（台北），回溯 30 天 → ...
-#   ✅ citrix.session 完成，累計 12345 筆，水位線 2026-10-27 23:58:12.123000
+#   ✅ citrix.administration_session 完成，累計 12345 筆，水位線 2026-10-27 23:58:12.123000
 #   ⏸️ 來源無資料，目標表不做任何異動
-#   ✅ private.citrix_xxx 重建完成，共 6789 筆
+#   ✅ private.citrix_administration_usage 重建完成，共 6789 筆
 #
 # 來源沒有新資料的表不會印 ✅ 那一行，改用 📈 那一行的水位線。
 # RAW 的表名是 citrix.<table key>（見 config/raw_tables.py）。
@@ -187,7 +188,7 @@ table_stats() {
             sub(/（台北）.*/, "", wm)
             sub(/\.[0-9]+$/, "", wm)
         }
-        /⏸️ 來源無資料/ {
+        /⏸️ 來源無資料，目標表/ {
             print "citrix." key "｜來源無新資料，水位線 " (wm == "" ? "（無）" : wm)
         }
         /✅ .* 完成，累計 / {
@@ -408,9 +409,15 @@ STAGE_OUTPUT="$RAW_OUTPUT"
 [ "$STAGE" = "STG" ] && STAGE_OUTPUT="$STG_OUTPUT"
 
 
-# raw.main 結束前印的失敗清單，例如 ['session', 'connection']
+# raw.main 結束前印的失敗清單，例如 ['administration_session', 'administration_connection']
 failed_tables() {
     grep -oE '以下表同步失敗：\[.*\]' "$RAW_OUTPUT" | tail -n 1 \
+        | sed -E "s/.*\[(.*)\]/\1/; s/'//g"
+}
+
+# stg.main 結束前印的失敗站台清單，例如 ['administration']
+failed_sites() {
+    grep -oE '以下站台重建失敗：\[.*\]' "$STG_OUTPUT" | tail -n 1 \
         | sed -E "s/.*\[(.*)\]/\1/; s/'//g"
 }
 
@@ -498,6 +505,8 @@ else
         REASON="RAW 同步失敗：${FAILED}（其餘已寫入，STG 未執行）"
     elif [ "$STAGE" = "RAW" ]; then
         REASON="RAW 執行出錯（STG 未執行）"
+    elif [ -n "$(failed_sites)" ]; then
+        REASON="STG 重建失敗：$(failed_sites)（已 rollback，維持上一班內容；其餘站台已重建）"
     else
         REASON="STG 重建失敗（已 rollback，維持上一班內容）"
     fi

@@ -1,30 +1,28 @@
 from utils.db_raw import get_conn
 
-TABLE_NAME = "citrix.application"
-TABLE_COMMENT = "應用程式清單（來源：MonitorData.Application）"
+TABLE_NAME = "citrix.design_engineering_user_account"
+TABLE_COMMENT = "Citrix 設計與工程軟體使用者清單（來源：CitrixFCUVDIMonitoring1.MonitorData.User）"
 
 # RAW 層：
 #   1. 欄位名稱完全照抄來源基底表（SQL Server 駝峰式），
 #      PostgreSQL 需以雙引號保留大小寫
-#   2. 時間欄位用 TIMESTAMP(6)，其餘一律 TEXT
+#   2. 來源欄位一律 TEXT，時間欄位存台北時間的字串（YYYY-MM-DD HH:MM:SS.ffffff）；
+#      唯一例外是增量水位線 ModifiedDate 用 TIMESTAMP(6)，存成 TEXT 會退化成字串比較
 #   3. 除系統欄位外皆可為空 —— RAW 的職責是收得進來，不是擋資料
 #   4. 欄位順序照抄來源
 #
 # (欄位名稱, 型別, NOT NULL, 欄位註解)
 COLUMNS = [
-    ("id", "BIGSERIAL PRIMARY KEY", True, "應用程式清單識別碼"),
+    ("id", "BIGSERIAL PRIMARY KEY", True, "使用者清單識別碼"),
 
-    ("Id",              "TEXT",          False, "應用程式識別碼"),
-    ("Name",            "TEXT",          False, "應用程式名稱（不含版本後綴）"),
-    ("PublishedName",   "TEXT",          False, "發佈名稱（使用者在 Workspace 看到的名稱）"),
-    ("ApplicationType", "TEXT",          False, "應用程式類型代碼"),
-    ("Enabled",         "TEXT",          False, "是否啟用"),
-    ("AdminFolder",     "TEXT",          False, "管理資料夾路徑"),
-    ("LifecycleState",  "TEXT",          False, "生命週期狀態代碼"),
-    ("Path",            "TEXT",          False, "執行檔路徑"),
-    ("BrowserName",     "TEXT",          False, "Citrix 內部唯一識別名稱"),
-    ("CreatedDate",     "TIMESTAMP(6)",  False, "來源建立時間"),
-    ("ModifiedDate",    "TIMESTAMP(6)",  False, "來源更新時間，增量抽取依據"),
+    ("Id",           "TEXT",          False, "來源使用者識別碼"),
+    ("Sid",          "TEXT",          False, "Windows 安全識別碼"),
+    ("Upn",          "TEXT",          False, "使用者主要名稱（UPN）"),
+    ("UserName",     "TEXT",          False, "使用者帳號（學號／職員編號）"),
+    ("FullName",     "TEXT",          False, "使用者姓名"),
+    ("Domain",       "TEXT",          False, "網域"),
+    ("CreatedDate",  "TEXT",          False, "來源建立時間"),
+    ("ModifiedDate", "TIMESTAMP(6)",  False, "來源更新時間，增量抽取依據"),
 
     ("created_at", "TIMESTAMP(6)", True, "資料建立時間"),
     ("updated_at", "TIMESTAMP(6)", True, "資料更新時間"),
@@ -35,7 +33,7 @@ UNIQUE_KEYS = ["Id"]
 
 # 增量抽取的水位線查詢
 INDEXES = [
-    ("idx_application_modified", ['"ModifiedDate"']),
+    ("idx_design_engineering_user_account_modified_date", ['"ModifiedDate"']),
 ]
 
 
@@ -61,7 +59,7 @@ def build_index_sql() -> list[str]:
     # 用 unique index 而非 constraint：CREATE ... IF NOT EXISTS 可重複執行，
     # ON CONFLICT 也吃 unique index
     stmts = [
-        f"CREATE UNIQUE INDEX IF NOT EXISTS uq_application_key "
+        f"CREATE UNIQUE INDEX IF NOT EXISTS uk_design_engineering_user_account_id "
         f"ON {TABLE_NAME} ({key_cols});"
     ]
 
