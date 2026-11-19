@@ -162,24 +162,45 @@ failed_logs_lines() {
 }
 
 
-# 從 stdin 讀 raw 與 stg 的輸出，整理成各表的筆數與水位線，每行「表名｜內容」。
+# 從 stdin 讀 raw 與 stg 的輸出，整理成各站台各表的筆數與水位線。
 # 取自這幾種行：
 #
-#   ───── administration_session ─────
+#   ═════ 行政系統（CitrixFCU01Monitoring）═════                 站台標頭（raw、stg 都會印）
+#   ───── session ─────                                          RAW 表頭
 #   📈 上次同步至 2026-10-27 23:58:12.123000（台北），回溯 30 天 → ...
 #   ✅ citrix.administration_session 完成，累計 12345 筆，水位線 2026-10-27 23:58:12.123000
-#   ⏸️ 來源無資料，目標表不做任何異動
+#   ⏸️ 來源無資料，目標表不做任何異動                             RAW 來源無新資料
 #   ✅ private.citrix_administration_usage 重建完成，共 6789 筆
+#   ⏸️ private.citrix_administration_usage 來源無資料，保留原表不做重建
+#
+# 輸出依站台分組，raw 與 stg 的輸出是分開的兩段，同一站台的兩段併在一起：
+#
+#   ## 行政系統（CitrixFCU01Monitoring）
+#   session｜累計 12345 筆，水位線 2026-10-27 23:58:12
+#   STG｜共 6789 筆
 #
 # 來源沒有新資料的表不會印 ✅ 那一行，改用 📈 那一行的水位線。
-# RAW 的表名是 citrix.<table key>（見 config/raw_tables.py）。
-# 水位線只留到秒。
+# 失敗的表列為「同步失敗」，失敗的站台 STG 列為「重建失敗」。水位線只留到秒。
+# 沒有站台標頭的舊格式 log 照樣列出，只是不分組。
 table_stats() {
     awk '
+        function add(item) {
+            if (!(title in items)) {
+                order[++n] = title
+                items[title] = ""
+            }
+            items[title] = items[title] item "\n"
+        }
+        /═════ .* ═════/ {
+            title = $0
+            sub(/.*═════ /, "", title)
+            sub(/ ═════.*/, "", title)
+            next
+        }
         /───── .* ─────/ {
-            key = $0
-            sub(/.*───── /, "", key)
-            sub(/ ─────.*/, "", key)
+            name = $0
+            sub(/.*───── /, "", name)
+            sub(/ ─────.*/, "", name)
             wm = ""
         }
         /📈 上次同步至 / {
@@ -189,22 +210,68 @@ table_stats() {
             sub(/\.[0-9]+$/, "", wm)
         }
         /⏸️ 來源無資料，目標表/ {
-            print "citrix." key "｜來源無新資料，水位線 " (wm == "" ? "（無）" : wm)
+            add(name "｜來源無新資料，水位線 " (wm == "" ? "（無）" : wm))
+        }
+        /⏸️ .* 來源無資料，保留原表/ {
+            add("STG｜來源無資料，保留原表")
         }
         /✅ .* 完成，累計 / {
             s = $0
             sub(/.*✅ /, "", s)
             sub(/\.[0-9]+$/, "", s)
             split(s, a, " 完成，")
-            print a[1] "｜" a[2]
+            add(name "｜" a[2])
         }
         /✅ .* 重建完成，共 / {
             s = $0
             sub(/.*✅ /, "", s)
             split(s, a, " 重建完成，")
-            print a[1] "｜" a[2]
+            add("STG｜" a[2])
+        }
+        /❌ .* 同步失敗，已 rollback/ {
+            add(name "｜同步失敗")
+        }
+        /❌ [^ ]* 失敗: / {
+            add("STG｜重建失敗，維持上一班內容")
+        }
+        END {
+            for (i = 1; i <= n; i++) {
+                if (i > 1) print ""
+                if (order[i] != "") print "## " order[i]
+                printf "%s", items[order[i]]
+            }
         }
     '
+}
+
+# 部分站台 RAW 失敗時，STG 重建了哪些站台，給失敗通知用。
+#
+# 用法：stg_coverage <raw 輸出> <stg 輸出>
+#
+# 站台以 raw 輸出裡的站台標頭為準；stg 輸出裡印了「重建完成」的算已重建，
+# 其餘（RAW 失敗而沒跑、STG 失敗、STG 來源無資料）都算未重建。
+# 輸出兩行「名稱｜站台、站台」，沒有就寫（無）。
+stg_coverage() {
+    awk '
+        /═════ .* ═════/ {
+            title = $0
+            sub(/.*═════ /, "", title)
+            sub(/ ═════.*/, "", title)
+            if (FNR == NR && !(title in seen)) {
+                seen[title] = 1
+                order[++n] = title
+            }
+        }
+        FNR != NR && /✅ .* 重建完成，共 / { done[title] = 1 }
+        END {
+            for (i = 1; i <= n; i++) {
+                if (order[i] in done) ok = ok (ok == "" ? "" : "、") order[i]
+                else                  ng = ng (ng == "" ? "" : "、") order[i]
+            }
+            print "STG 已重建｜" (ok == "" ? "（無）" : ok)
+            print "STG 未重建，維持上一班內容｜" (ng == "" ? "（無）" : ng)
+        }
+    ' "$1" "$2"
 }
 
 # 失敗標記：每班失敗時寫進 log 的那一行，週報靠它計數
@@ -393,9 +460,22 @@ run_stage() {
     return "${PIPESTATUS[0]}"
 }
 
-# raw 與 stg 依序執行，raw 失敗就不跑 stg：避免拿半套的來源資料去
-# 覆蓋已經正確的 stg。RAW 是差異 upsert、STG 是整表重建，都可重跑。
+# raw.main 失敗時印的「表全部完成的站台」，空白分隔，例如 administration statistics_computing。
+# 沒有這一行（程式在跑表之前就出錯、容器沒在跑）時輸出空字串。
+raw_ok_sites() {
+    grep -oE '以下站台全部表同步完成：\[.*\]' "$RAW_OUTPUT" | tail -n 1 \
+        | sed -E "s/.*\[(.*)\]/\1/; s/[',]//g"
+}
+
+# raw 與 stg 依序執行。某個站台的 RAW 有表失敗時，那個站台不跑 stg：
+# 避免拿半套的來源資料去覆蓋已經正確的 stg。其餘站台的 RAW 已經完整，
+# stg 照常重建，不被另一個站台拖住。RAW 是差異 upsert、STG 是整表重建，都可重跑。
+#
+# 只有 raw.main 自己回報了哪些站台完整時，才跑部分站台；超時、容器沒在跑、
+# 程式在跑表之前就出錯，一律不跑 stg。
+# 部分站台的這一班仍然算失敗：STAGE 維持 RAW，離開碼維持 raw 的。
 STAGE="RAW"
+STG_PARTIAL=false
 run_stage "$RAW_OUTPUT" raw.main all
 RC=$?
 
@@ -403,6 +483,13 @@ if [ "$RC" -eq 0 ]; then
     STAGE="STG"
     run_stage "$STG_OUTPUT" stg.main
     RC=$?
+elif [ "$RC" -eq 1 ]; then
+    read -ra OK_SITES <<< "$(raw_ok_sites)"
+
+    if [ "${#OK_SITES[@]}" -gt 0 ]; then
+        STG_PARTIAL=true
+        run_stage "$STG_OUTPUT" stg.main "${OK_SITES[@]}"
+    fi
 fi
 
 STAGE_OUTPUT="$RAW_OUTPUT"
@@ -501,6 +588,10 @@ else
         REASON="${STAGE} 超過 ${RUN_TIMEOUT/m/ 分鐘}被中止"
     elif [ "$STATE" != "執行中" ]; then
         REASON="容器 ${CONTAINER} ${STATE}，程式沒有執行"
+    elif [ "$STAGE" = "RAW" ] && [ -n "$FAILED" ] && [ "$STG_PARTIAL" = true ]; then
+        REASON="RAW 同步失敗：${FAILED}（其餘已寫入）
+
+$(stg_coverage "$RAW_OUTPUT" "$STG_OUTPUT")"
     elif [ "$STAGE" = "RAW" ] && [ -n "$FAILED" ]; then
         REASON="RAW 同步失敗：${FAILED}（其餘已寫入，STG 未執行）"
     elif [ "$STAGE" = "RAW" ]; then

@@ -17,6 +17,7 @@ import psycopg2
 from psycopg2.extras import execute_values
 
 from config.stg_tables import COLUMNS, TARGET_TABLES, build_source_sql
+from utils.db_citrix import site_title
 from utils.db_raw import get_conn as get_raw_conn
 from utils.db_stg import get_conn as get_stg_conn
 from utils.logger import get_logger
@@ -49,7 +50,7 @@ def rebuild(site: str, target_table: str):
         )
 
     if not rows:
-        print_log("⏸️ 來源無資料，保留原表不做重建")
+        print_log(f"⏸️ {target_table} 來源無資料，保留原表不做重建")
         return
 
     # 2️⃣ 單一交易內：清空 + 寫入
@@ -106,7 +107,7 @@ def main(sites=None):
             print_log(f"⚠️ {site} 不是站台前綴，跳過")
             continue
 
-        print_log(f"───── {site} ─────")
+        print_log(f"═════ {site_title(site)} ═════")
 
         try:
             rebuild(site, TARGET_TABLES[site])

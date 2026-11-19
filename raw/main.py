@@ -10,6 +10,7 @@ RAW 層 ETL 主程式（三個站台、各五張表共用）
 import sys
 
 from config.raw_tables import CITRIX_SITES, RAW_TABLES
+from utils.db_citrix import site_title
 from utils.incremental_etl import run_incremental_etl
 from utils.logger import get_logger
 
@@ -35,6 +36,7 @@ def main(table_keys=None, all_tables=False):
         ]
 
     failed = []
+    sites = []
 
     for table_key in table_keys:
         if table_key not in RAW_TABLES:
@@ -42,7 +44,13 @@ def main(table_keys=None, all_tables=False):
             continue
 
         cfg = RAW_TABLES[table_key]
-        print_log(f"───── {table_key} ─────")
+
+        # 站台標頭：同一站台的表在 table_keys 裡是連續的，換站台時印一次
+        if not sites or sites[-1] != cfg["site"]:
+            sites.append(cfg["site"])
+            print_log(f"═════ {site_title(cfg['site'])} ═════")
+
+        print_log(f"───── {cfg['table']} ─────")
 
         try:
             run_incremental_etl(table_key, cfg, print_log)
@@ -51,7 +59,13 @@ def main(table_keys=None, all_tables=False):
             failed.append(table_key)
 
     if failed:
+        # run_etl.sh 讀這三行：失敗的表寫進通知，表全部完成的站台照常跑 STG
+        failed_sites = list(dict.fromkeys(RAW_TABLES[k]["site"] for k in failed))
+        ok_sites = [s for s in sites if s not in failed_sites]
+
         print_log(f"❌ 以下表同步失敗：{failed}")
+        print_log(f"❌ 以下站台有表同步失敗：{failed_sites}")
+        print_log(f"✔️ 以下站台全部表同步完成：{ok_sites}")
         sys.exit(1)
 
     print_log("🎉 Citrix RAW 同步完成")

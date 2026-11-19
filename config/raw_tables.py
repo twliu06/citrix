@@ -26,14 +26,26 @@ Citrix 的資料列會就地更新 —— 例如 session 開始時先寫入一�
 上限存在的理由是避免無意義的大範圍掃描，不是資料安全。
 """
 
-# 站台前綴 → 用途與來源 DB
+# 站台前綴 → 名稱與用途
+#
+#   label        log 的站台標頭、通知裡的分組名稱
+#   description  站台提供的服務與來源 DB，給人看的說明
 #
 # 連線資訊放在 .env：CITRIX_<前綴大寫>_HOST、CITRIX_<前綴大寫>_DB，
 # 帳號密碼三站共用 CITRIX_USER、CITRIX_PASSWORD。
 CITRIX_SITES = {
-    "administration": "行政系統（校務系統、櫃台服務系統、行動辦公室），CitrixFCU01Monitoring",
-    "statistics_computing": "統計與數值計算軟體（SPSS、SAS、MATLAB 等），CitrixFCU02Monitoring",
-    "design_engineering": "設計與工程軟體（AutoCAD、SOLIDWORKS、ANSYS 等，GPU 主機），CitrixFCUVDIMonitoring1",
+    "administration": {
+        "label": "行政系統",
+        "description": "校務系統、櫃台服務系統、行動辦公室，CitrixFCU01Monitoring",
+    },
+    "statistics_computing": {
+        "label": "統計與數值計算軟體",
+        "description": "SPSS、SAS、MATLAB 等，CitrixFCU02Monitoring",
+    },
+    "design_engineering": {
+        "label": "設計與工程軟體",
+        "description": "AutoCAD、SOLIDWORKS、ANSYS 等，GPU 主機，CitrixFCUVDIMonitoring1",
+    },
 }
 
 # 來源表 → RAW 表名（不含站台前綴）與自然鍵
@@ -50,6 +62,7 @@ SOURCE_TABLES = {
 RAW_TABLES = {
     f"{site}_{table}": {
         "site": site,
+        "table": table,
         "original_table": original_table,
         "target_table": f"citrix.{site}_{table}",
         "key_cols": key_cols,
